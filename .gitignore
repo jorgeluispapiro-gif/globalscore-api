@@ -1,0 +1,60 @@
+# Materiais de referência locais que não pertencem ao produto público
+/Planilha de conversão.xlsx
+/Painel Av Global (1).html
+/mvp be avançado__ Plataforma A.pdf
+/AGENTS.md
+/CONTEXTO_DO_PROJETO.md
+/backend/popular_exemplo.py
+/backend/preparar_validacao_manual.py
+
+# Dados tabulares, documentos acadêmicos e arquivos recebidos de terceiros
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.pdf
+/referencias/
+/dados_entrada/
+/uploads/
+/exportacoes/
+
+# Bancos e arquivos gerados em execução
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+backend/dados/
+
+# Segredos e configurações particulares
+.env
+.env.*
+!.env.exemplo
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ferramentas locais e sistema operacional
+.agents/
+.codex/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+*.swp
+*~

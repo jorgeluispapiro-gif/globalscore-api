@@ -1,0 +1,28 @@
+from flask_restx import Api
+
+
+api = Api(
+    title="GlobalScore API",
+    version="1.0",
+    description="API para avaliações comparativas com bases percentílicas congeladas.",
+    doc="/docs",
+)
+
+
+def registrar_namespaces():
+    """Importação tardia evita dependência circular durante a criação da aplicação."""
+
+    from app.api.rotas import (
+        namespace_avaliacoes,
+        namespace_bases,
+        namespace_indicadores,
+        namespace_observacoes,
+        namespace_sistema,
+    )
+
+    api.add_namespace(namespace_sistema)
+    api.add_namespace(namespace_indicadores)
+    api.add_namespace(namespace_observacoes)
+    api.add_namespace(namespace_bases)
+    api.add_namespace(namespace_avaliacoes)
+
