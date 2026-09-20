@@ -428,13 +428,11 @@ class EntidadeResource(Resource):
         dados = request.json or {}
         if "projeto_id" in dados and dados["projeto_id"] != entidade.projeto_id:
             namespace_entidades.abort(400, "O projeto de uma entidade existente não pode ser alterado.")
-        if "grupo_id" in dados:
-            grupo = banco.session.get(GrupoComparavel, dados["grupo_id"])
-            if grupo is None:
-                namespace_entidades.abort(404, "Grupo comparável não encontrado.")
-            if grupo.projeto_id != entidade.projeto_id:
-                namespace_entidades.abort(400, "O grupo deve pertencer ao projeto da entidade.")
-            entidade.grupo_id = grupo.id
+        if "grupo_id" in dados and dados["grupo_id"] != entidade.grupo_id:
+            namespace_entidades.abort(
+                400,
+                "O grupo de uma entidade existente não pode ser alterado no MVP.",
+            )
         for campo in {"codigo", "nome", "descricao", "ativa"}:
             if campo in dados:
                 setattr(entidade, campo, dados[campo])
