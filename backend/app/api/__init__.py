@@ -15,14 +15,19 @@ def registrar_namespaces():
     from app.api.rotas import (
         namespace_avaliacoes,
         namespace_bases,
+        namespace_entidades,
+        namespace_grupos,
         namespace_indicadores,
         namespace_observacoes,
+        namespace_projetos,
         namespace_sistema,
     )
 
     api.add_namespace(namespace_sistema)
+    api.add_namespace(namespace_projetos)
+    api.add_namespace(namespace_grupos)
+    api.add_namespace(namespace_entidades)
     api.add_namespace(namespace_indicadores)
     api.add_namespace(namespace_observacoes)
     api.add_namespace(namespace_bases)
     api.add_namespace(namespace_avaliacoes)
-

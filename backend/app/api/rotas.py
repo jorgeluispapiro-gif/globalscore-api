@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from flask import request
 from flask_restx import Namespace, Resource, fields
+from sqlalchemy.exc import IntegrityError
 
 from app.extensoes import banco
 from app.modelos import (
@@ -24,11 +25,47 @@ from app.servicos.bases_referencia import (
 
 
 namespace_sistema = Namespace("sistema", description="Estado da aplicação")
+namespace_projetos = Namespace("projetos", description="Configuração dos projetos")
+namespace_grupos = Namespace("grupos", description="Configuração dos grupos comparáveis")
+namespace_entidades = Namespace("entidades", description="Cadastro das entidades avaliadas")
 namespace_indicadores = Namespace("indicadores", description="CRUD de indicadores")
-namespace_observacoes = Namespace("observacoes", description="Entrada manual de valores")
+namespace_observacoes = Namespace("observacoes", description="Consulta e entrada manual de valores")
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
 namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global Score")
 
+
+modelo_projeto = namespace_projetos.model(
+    "ProjetoEntrada",
+    {
+        "nome": fields.String(required=True),
+        "descricao": fields.String,
+        "periodicidade": fields.String(enum=["MENSAL"], default="MENSAL"),
+        "status": fields.String(enum=["RASCUNHO", "ATIVO", "ARQUIVADO"], default="RASCUNHO"),
+        "criado_por": fields.String(default="sistema"),
+    },
+)
+
+modelo_grupo = namespace_grupos.model(
+    "GrupoComparavelEntrada",
+    {
+        "projeto_id": fields.Integer(required=True),
+        "nome": fields.String(required=True),
+        "descricao": fields.String,
+        "ativo": fields.Boolean(default=True),
+    },
+)
+
+modelo_entidade = namespace_entidades.model(
+    "EntidadeEntrada",
+    {
+        "projeto_id": fields.Integer(required=True),
+        "grupo_id": fields.Integer(required=True),
+        "codigo": fields.String(required=True),
+        "nome": fields.String(required=True),
+        "descricao": fields.String,
+        "ativa": fields.Boolean(default=True),
+    },
+)
 
 modelo_indicador = namespace_indicadores.model(
     "IndicadorEntrada",
@@ -106,6 +143,65 @@ def indicador_para_dict(indicador):
     }
 
 
+def projeto_para_dict(projeto):
+    """Transforma o modelo em um objeto simples para a resposta JSON."""
+
+    return {
+        "id": projeto.id,
+        "nome": projeto.nome,
+        "descricao": projeto.descricao,
+        "periodicidade": projeto.periodicidade,
+        "status": projeto.status,
+        "criado_por": projeto.criado_por,
+        "criado_em": projeto.criado_em.isoformat(),
+        "atualizado_em": projeto.atualizado_em.isoformat(),
+    }
+
+
+def grupo_para_dict(grupo):
+    return {
+        "id": grupo.id,
+        "projeto_id": grupo.projeto_id,
+        "nome": grupo.nome,
+        "descricao": grupo.descricao,
+        "ativo": grupo.ativo,
+    }
+
+
+def entidade_para_dict(entidade):
+    return {
+        "id": entidade.id,
+        "projeto_id": entidade.projeto_id,
+        "grupo_id": entidade.grupo_id,
+        "codigo": entidade.codigo,
+        "nome": entidade.nome,
+        "descricao": entidade.descricao,
+        "ativa": entidade.ativa,
+    }
+
+
+def observacao_para_dict(observacao):
+    return {
+        "id": observacao.id,
+        "projeto_id": observacao.projeto_id,
+        "entidade_id": observacao.entidade_id,
+        "indicador_id": observacao.indicador_id,
+        "periodo": observacao.periodo,
+        "valor": float(observacao.valor),
+        "origem": observacao.origem,
+    }
+
+
+def confirmar_transacao(namespace, mensagem_conflito):
+    """Converte violações de unicidade em mensagens compreensíveis no Swagger."""
+
+    try:
+        banco.session.commit()
+    except IntegrityError:
+        banco.session.rollback()
+        namespace.abort(409, mensagem_conflito)
+
+
 def base_para_dict(base):
     indicadores = IndicadorBaseReferencia.query.filter_by(base_referencia_id=base.id).all()
     return {
@@ -165,6 +261,190 @@ class SaudeResource(Resource):
         return {"status": "ok", "servico": "GlobalScore API"}
 
 
+@namespace_projetos.route("")
+class ProjetosResource(Resource):
+    def get(self):
+        """Lista os projetos cadastrados."""
+
+        projetos = Projeto.query.order_by(Projeto.id).all()
+        return [projeto_para_dict(projeto) for projeto in projetos]
+
+    @namespace_projetos.expect(modelo_projeto, validate=True)
+    def post(self):
+        """Cria o contêiner principal da avaliação."""
+
+        dados = request.json
+        projeto = Projeto(
+            nome=dados["nome"],
+            descricao=dados.get("descricao"),
+            periodicidade=dados.get("periodicidade", "MENSAL"),
+            status=dados.get("status", "RASCUNHO"),
+            criado_por=dados.get("criado_por", "sistema"),
+        )
+        banco.session.add(projeto)
+        banco.session.commit()
+        return projeto_para_dict(projeto), 201
+
+
+@namespace_projetos.route("/<int:projeto_id>")
+class ProjetoResource(Resource):
+    def get(self, projeto_id):
+        projeto = banco.session.get(Projeto, projeto_id)
+        if projeto is None:
+            namespace_projetos.abort(404, "Projeto não encontrado.")
+        return projeto_para_dict(projeto)
+
+    @namespace_projetos.expect(modelo_projeto, validate=False)
+    def patch(self, projeto_id):
+        """Atualiza somente dados administrativos do projeto."""
+
+        projeto = banco.session.get(Projeto, projeto_id)
+        if projeto is None:
+            namespace_projetos.abort(404, "Projeto não encontrado.")
+        dados = request.json or {}
+        for campo in {"nome", "descricao", "status"}:
+            if campo in dados:
+                setattr(projeto, campo, dados[campo])
+        # A periodicidade é mensal no MVP e não muda depois da criação.
+        banco.session.commit()
+        return projeto_para_dict(projeto)
+
+
+@namespace_grupos.route("")
+class GruposResource(Resource):
+    @namespace_grupos.doc(params={"projeto_id": "Filtra os grupos pelo identificador do projeto."})
+    def get(self):
+        """Lista grupos, opcionalmente limitados a um projeto."""
+
+        consulta = GrupoComparavel.query
+        projeto_id = request.args.get("projeto_id", type=int)
+        if projeto_id is not None:
+            consulta = consulta.filter_by(projeto_id=projeto_id)
+        return [grupo_para_dict(grupo) for grupo in consulta.order_by(GrupoComparavel.id).all()]
+
+    @namespace_grupos.expect(modelo_grupo, validate=True)
+    def post(self):
+        dados = request.json
+        if banco.session.get(Projeto, dados["projeto_id"]) is None:
+            namespace_grupos.abort(404, "Projeto não encontrado.")
+        grupo = GrupoComparavel(
+            projeto_id=dados["projeto_id"],
+            nome=dados["nome"],
+            descricao=dados.get("descricao"),
+            ativo=dados.get("ativo", True),
+        )
+        banco.session.add(grupo)
+        banco.session.commit()
+        return grupo_para_dict(grupo), 201
+
+
+@namespace_grupos.route("/<int:grupo_id>")
+class GrupoResource(Resource):
+    def get(self, grupo_id):
+        grupo = banco.session.get(GrupoComparavel, grupo_id)
+        if grupo is None:
+            namespace_grupos.abort(404, "Grupo comparável não encontrado.")
+        return grupo_para_dict(grupo)
+
+    @namespace_grupos.expect(modelo_grupo, validate=False)
+    def patch(self, grupo_id):
+        """Preserva o vínculo do grupo com o projeto e altera seus dados próprios."""
+
+        grupo = banco.session.get(GrupoComparavel, grupo_id)
+        if grupo is None:
+            namespace_grupos.abort(404, "Grupo comparável não encontrado.")
+        dados = request.json or {}
+        if "projeto_id" in dados and dados["projeto_id"] != grupo.projeto_id:
+            namespace_grupos.abort(400, "O projeto de um grupo existente não pode ser alterado.")
+        for campo in {"nome", "descricao", "ativo"}:
+            if campo in dados:
+                setattr(grupo, campo, dados[campo])
+        banco.session.commit()
+        return grupo_para_dict(grupo)
+
+
+@namespace_entidades.route("")
+class EntidadesResource(Resource):
+    @namespace_entidades.doc(
+        params={
+            "projeto_id": "Filtra as entidades pelo identificador do projeto.",
+            "grupo_id": "Filtra as entidades pelo identificador do grupo comparável.",
+        }
+    )
+    def get(self):
+        """Lista entidades com filtros independentes por projeto e grupo."""
+
+        consulta = Entidade.query
+        projeto_id = request.args.get("projeto_id", type=int)
+        grupo_id = request.args.get("grupo_id", type=int)
+        if projeto_id is not None:
+            consulta = consulta.filter_by(projeto_id=projeto_id)
+        if grupo_id is not None:
+            consulta = consulta.filter_by(grupo_id=grupo_id)
+        return [entidade_para_dict(item) for item in consulta.order_by(Entidade.id).all()]
+
+    @namespace_entidades.expect(modelo_entidade, validate=True)
+    def post(self):
+        dados = request.json
+        projeto = banco.session.get(Projeto, dados["projeto_id"])
+        if projeto is None:
+            namespace_entidades.abort(404, "Projeto não encontrado.")
+        grupo = banco.session.get(GrupoComparavel, dados["grupo_id"])
+        if grupo is None:
+            namespace_entidades.abort(404, "Grupo comparável não encontrado.")
+        if grupo.projeto_id != projeto.id:
+            namespace_entidades.abort(400, "O grupo deve pertencer ao projeto da entidade.")
+        entidade = Entidade(
+            projeto_id=projeto.id,
+            grupo_id=grupo.id,
+            codigo=dados["codigo"],
+            nome=dados["nome"],
+            descricao=dados.get("descricao"),
+            ativa=dados.get("ativa", True),
+        )
+        banco.session.add(entidade)
+        confirmar_transacao(
+            namespace_entidades,
+            "Já existe uma entidade com esse código dentro do projeto.",
+        )
+        return entidade_para_dict(entidade), 201
+
+
+@namespace_entidades.route("/<int:entidade_id>")
+class EntidadeResource(Resource):
+    def get(self, entidade_id):
+        entidade = banco.session.get(Entidade, entidade_id)
+        if entidade is None:
+            namespace_entidades.abort(404, "Entidade não encontrada.")
+        return entidade_para_dict(entidade)
+
+    @namespace_entidades.expect(modelo_entidade, validate=False)
+    def patch(self, entidade_id):
+        """Edita ou desativa logicamente a entidade sem apagar seu histórico."""
+
+        entidade = banco.session.get(Entidade, entidade_id)
+        if entidade is None:
+            namespace_entidades.abort(404, "Entidade não encontrada.")
+        dados = request.json or {}
+        if "projeto_id" in dados and dados["projeto_id"] != entidade.projeto_id:
+            namespace_entidades.abort(400, "O projeto de uma entidade existente não pode ser alterado.")
+        if "grupo_id" in dados:
+            grupo = banco.session.get(GrupoComparavel, dados["grupo_id"])
+            if grupo is None:
+                namespace_entidades.abort(404, "Grupo comparável não encontrado.")
+            if grupo.projeto_id != entidade.projeto_id:
+                namespace_entidades.abort(400, "O grupo deve pertencer ao projeto da entidade.")
+            entidade.grupo_id = grupo.id
+        for campo in {"codigo", "nome", "descricao", "ativa"}:
+            if campo in dados:
+                setattr(entidade, campo, dados[campo])
+        confirmar_transacao(
+            namespace_entidades,
+            "Já existe uma entidade com esse código dentro do projeto.",
+        )
+        return entidade_para_dict(entidade)
+
+
 @namespace_indicadores.route("")
 class IndicadoresResource(Resource):
     def get(self):
@@ -198,7 +478,10 @@ class IndicadoresResource(Resource):
             participa_global_score=dados.get("participa_global_score", True),
         )
         banco.session.add(indicador)
-        banco.session.commit()
+        confirmar_transacao(
+            namespace_indicadores,
+            "Já existe um indicador com esse código dentro do projeto.",
+        )
         return indicador_para_dict(indicador), 201
 
 
@@ -235,7 +518,10 @@ class IndicadorResource(Resource):
             if peso < 0 or peso > 100:
                 namespace_indicadores.abort(400, "O peso deve estar entre 0 e 100.")
             indicador.peso_percentual = peso
-        banco.session.commit()
+        confirmar_transacao(
+            namespace_indicadores,
+            "Já existe um indicador com esse código dentro do projeto.",
+        )
         return indicador_para_dict(indicador)
 
     def delete(self, indicador_id):
@@ -251,6 +537,32 @@ class IndicadorResource(Resource):
 
 @namespace_observacoes.route("")
 class ObservacoesResource(Resource):
+    @namespace_observacoes.doc(
+        params={
+            "projeto_id": "Filtra pelo identificador do projeto.",
+            "entidade_id": "Filtra pelo identificador da entidade.",
+            "indicador_id": "Filtra pelo identificador do indicador.",
+            "periodo": "Filtra pelo período mensal no formato AAAA-MM.",
+        }
+    )
+    def get(self):
+        """Consulta observações usando qualquer combinação dos filtros disponíveis."""
+
+        consulta = Observacao.query
+        filtros = {
+            "projeto_id": request.args.get("projeto_id", type=int),
+            "entidade_id": request.args.get("entidade_id", type=int),
+            "indicador_id": request.args.get("indicador_id", type=int),
+            "periodo": request.args.get("periodo", type=str),
+        }
+        for campo, valor in filtros.items():
+            if valor is not None:
+                consulta = consulta.filter_by(**{campo: valor})
+        return [
+            observacao_para_dict(item)
+            for item in consulta.order_by(Observacao.periodo, Observacao.id).all()
+        ]
+
     @namespace_observacoes.expect(modelo_observacao, validate=True)
     def post(self):
         """Registra manualmente uma observação mensal."""
@@ -270,8 +582,11 @@ class ObservacoesResource(Resource):
             valor=Decimal(str(dados["valor"])),
         )
         banco.session.add(observacao)
-        banco.session.commit()
-        return {"id": observacao.id}, 201
+        confirmar_transacao(
+            namespace_observacoes,
+            "Já existe uma observação para essa entidade, indicador e período.",
+        )
+        return observacao_para_dict(observacao), 201
 
 
 @namespace_bases.route("")
