@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from flask import request
+from flask import g, request
 from flask_restx import Namespace, Resource, fields, reqparse
 from sqlalchemy.exc import IntegrityError
 
@@ -17,6 +17,7 @@ from app.modelos import (
     Projeto,
 )
 from app.servicos.avaliacoes import calcular_avaliacao
+from app.servicos.autenticacao import autenticacao_obrigatoria
 from app.servicos.bases_referencia import (
     ajustar_pesos_base,
     ativar_base_referencia,
@@ -36,6 +37,9 @@ from werkzeug.datastructures import FileStorage
 
 
 namespace_sistema = Namespace("sistema", description="Estado da aplicação")
+namespace_autenticacao = Namespace(
+    "autenticacao", description="Validação da sessão externa do Supabase Auth"
+)
 namespace_projetos = Namespace("projetos", description="Configuração dos projetos")
 namespace_grupos = Namespace("grupos", description="Configuração dos grupos comparáveis")
 namespace_entidades = Namespace("entidades", description="Cadastro das entidades avaliadas")
@@ -48,7 +52,6 @@ namespace_importacoes = Namespace("importacoes", description="Importação assis
 
 parser_upload = reqparse.RequestParser()
 parser_upload.add_argument("projeto_id", type=int, required=True, location="form")
-parser_upload.add_argument("criado_por", type=str, location="form", default="sistema")
 parser_upload.add_argument("arquivo", type=FileStorage, required=True, location="files")
 
 modelo_validacao_importacao = namespace_importacoes.model(
@@ -624,16 +627,31 @@ class ObservacoesResource(Resource):
         return observacao_para_dict(observacao), 201
 
 
+@namespace_autenticacao.route("/me")
+class UsuarioAutenticadoResource(Resource):
+    @namespace_autenticacao.doc(security="Bearer")
+    @autenticacao_obrigatoria
+    def get(self):
+        """Confirma a sessão e devolve a identidade reconhecida pelo Supabase."""
+
+        return {
+            "id": g.usuario_autenticado["id"],
+            "email": g.usuario_autenticado.get("email"),
+        }
+
+
 @namespace_importacoes.route("")
+@namespace_importacoes.doc(security="Bearer")
 class ImportacoesResource(Resource):
     @namespace_importacoes.expect(parser_upload)
+    @autenticacao_obrigatoria
     def post(self):
         """Recebe arquivo temporário e devolve uma inspeção sem decidir o mapeamento."""
 
         dados = parser_upload.parse_args()
         try:
             importacao, preview = receber_arquivo(
-                dados["projeto_id"], dados["arquivo"], dados.get("criado_por") or "sistema"
+                dados["projeto_id"], dados["arquivo"], g.usuario_autenticado["id"]
             )
             resposta = importacao_para_dict(importacao)
             resposta["inspecao"] = preview
@@ -644,7 +662,9 @@ class ImportacoesResource(Resource):
 
 
 @namespace_importacoes.route("/<int:importacao_id>")
+@namespace_importacoes.doc(security="Bearer")
 class ImportacaoResource(Resource):
+    @autenticacao_obrigatoria
     def get(self, importacao_id):
         """Consulta somente metadados e resultados; o arquivo e seu caminho são privados."""
 
@@ -655,8 +675,10 @@ class ImportacaoResource(Resource):
 
 
 @namespace_importacoes.route("/<int:importacao_id>/validar")
+@namespace_importacoes.doc(security="Bearer")
 class ValidarImportacaoResource(Resource):
     @namespace_importacoes.expect(modelo_validacao_importacao, validate=True)
+    @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Executa o dry-run e não grava entidades, indicadores ou observações."""
 
@@ -668,8 +690,10 @@ class ValidarImportacaoResource(Resource):
 
 
 @namespace_importacoes.route("/<int:importacao_id>/confirmar")
+@namespace_importacoes.doc(security="Bearer")
 class ConfirmarImportacaoResource(Resource):
     @namespace_importacoes.expect(modelo_confirmacao_importacao, validate=False)
+    @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Confirma atomicamente; alertas exigem aceite explícito do gestor."""
 
@@ -690,7 +714,9 @@ class ConfirmarImportacaoResource(Resource):
 
 
 @namespace_importacoes.route("/<int:importacao_id>/observacoes")
+@namespace_importacoes.doc(security="Bearer")
 class ObservacoesImportacaoResource(Resource):
+    @autenticacao_obrigatoria
     def get(self, importacao_id):
         """Lista os registros gravados por um lote para garantir rastreabilidade."""
 
@@ -703,7 +729,9 @@ class ObservacoesImportacaoResource(Resource):
 
 
 @namespace_importacoes.route("/<int:importacao_id>/anular")
+@namespace_importacoes.doc(security="Bearer")
 class AnularImportacaoResource(Resource):
+    @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Cancela lote pendente ou anula lote concluído que ainda não foi consumido."""
 

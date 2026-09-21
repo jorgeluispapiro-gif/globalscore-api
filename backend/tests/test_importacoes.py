@@ -10,6 +10,7 @@ from app.configuracao import ConfiguracaoTeste
 from app.extensoes import banco
 from app.modelos import Entidade, GrupoComparavel, Importacao, Indicador, Observacao, Projeto
 from app.servicos import importacoes as servico_importacoes
+from app.servicos import autenticacao as servico_autenticacao
 
 
 @pytest.fixture(scope="module")
@@ -102,6 +103,21 @@ def preparar_lote_atipico(cliente, projeto_id, indicador_id):
         f"/importacoes/{importacao_id}/validar", json=payload_largo(indicador_id)
     )
     return importacao_id, resposta
+
+
+def cabecalho_autenticacao(token="token-valido"):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def ativar_autenticacao_de_teste(aplicacao, monkeypatch):
+    """Ativa a proteção apenas no teste atual e simula a API externa."""
+
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+    monkeypatch.setattr(
+        servico_autenticacao,
+        "validar_token_supabase",
+        lambda _token: {"id": "usuario-supabase-123", "email": "usuario@email.com"},
+    )
 
 
 def test_csv_valido_cria_observacao(ambiente):
@@ -331,3 +347,83 @@ def test_lote_usado_por_base_e_avaliacao_nao_pode_ser_anulado(ambiente):
     assert dados["quantidade_bases_dependentes"] == 1
     assert dados["quantidade_avaliacoes_dependentes"] == 1
     assert Observacao.query.filter_by(importacao_id=importacao_id).count() == 4
+
+
+def test_rota_protegida_sem_token_retorna_401(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    resposta = cliente.get("/importacoes/1")
+    assert resposta.status_code == 401
+
+
+def test_token_invalido_retorna_401(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+
+    def rejeitar_token(_token):
+        raise servico_autenticacao.CredenciaisInvalidasError(
+            "Token de autenticação inválido."
+        )
+
+    monkeypatch.setattr(servico_autenticacao, "validar_token_supabase", rejeitar_token)
+    resposta = cliente.get(
+        "/autenticacao/me", headers=cabecalho_autenticacao("invalido")
+    )
+    assert resposta.status_code == 401
+
+
+def test_token_valido_permite_acesso_a_rota_protegida(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    # O 404 demonstra que a autenticação passou e a rota procurou o lote solicitado.
+    resposta = cliente.get("/importacoes/999", headers=cabecalho_autenticacao())
+    assert resposta.status_code == 404
+
+
+def test_me_retorna_usuario_autenticado(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    resposta = cliente.get("/autenticacao/me", headers=cabecalho_autenticacao())
+    assert resposta.status_code == 200
+    assert resposta.get_json() == {
+        "id": "usuario-supabase-123",
+        "email": "usuario@email.com",
+    }
+
+
+def test_indisponibilidade_do_supabase_retorna_503(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+
+    def simular_indisponibilidade(_token):
+        raise servico_autenticacao.ServicoAutenticacaoIndisponivelError(
+            "O serviço de autenticação está temporariamente indisponível."
+        )
+
+    monkeypatch.setattr(
+        servico_autenticacao, "validar_token_supabase", simular_indisponibilidade
+    )
+    resposta = cliente.get("/autenticacao/me", headers=cabecalho_autenticacao())
+    assert resposta.status_code == 503
+
+
+def test_importacao_usa_id_autenticado_como_criado_por(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    resposta = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={
+            "projeto_id": str(projeto_id),
+            # O campo forjado não pertence mais ao contrato e deve ser ignorado.
+            "criado_por": "identidade-forjada",
+            "arquivo": (
+                io.BytesIO(b"codigo;periodo;valor\n001;01/2026;10\n"),
+                "dados.csv",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resposta.status_code == 201, resposta.get_json()
+    importacao = banco.session.get(Importacao, resposta.get_json()["id"])
+    assert importacao.criado_por == "usuario-supabase-123"

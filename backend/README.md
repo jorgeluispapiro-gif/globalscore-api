@@ -1,4 +1,4 @@
-# GlobalScore API — Etapa 2A
+# GlobalScore API
 
 Backend do MVP GlobalScore, responsável por persistir dados, construir Bases de
 Referência congeladas e calcular avaliações ponderadas.
@@ -11,6 +11,7 @@ Referência congeladas e calcular avaliações ponderadas.
 - SQLite
 - Swagger
 - openpyxl, somente para leitura de XLSX
+- Supabase Auth como API externa de autenticação
 
 ## Execução local
 
@@ -23,6 +24,11 @@ python executar.py
 
 A API ficará disponível em `http://localhost:5000` e o Swagger em
 `http://localhost:5000/docs`.
+
+Antes de iniciar a API, use `backend/.env.example` como referência e defina no
+ambiente `SUPABASE_URL` e `SUPABASE_PUBLIC_KEY`. O arquivo `.env` real não deve ser
+versionado. A aplicação lê variáveis do processo; no Docker, elas podem ser
+fornecidas com `--env-file`.
 
 ## Testes essenciais
 
@@ -40,6 +46,7 @@ docker run --rm -p 5000:5000 -v globalscore_dados:/app/dados globalscore-api
 ## Rotas iniciais
 
 - `GET /sistema/saude`
+- `GET /autenticacao/me`
 - `GET|POST /projetos`
 - `GET|PATCH /projetos/{id}`
 - `GET|POST /grupos`
@@ -128,3 +135,41 @@ Exemplo mínimo de configuração e mapeamento para CSV largo:
 
 Células vazias não geram observações. Duplicidades são relatadas no dry-run e
 impedem a confirmação. O arquivo temporário é removido depois da conclusão.
+
+## Autenticação externa com Supabase
+
+O Supabase Auth foi escolhido como o terceiro componente exigido pela pós: uma
+API externa pública que possui [plano gratuito](https://supabase.com/docs/guides/platform/billing-on-supabase).
+No MVP, ele é usado somente para autenticação por e-mail e senha. O banco de dados
+do GlobalScore continua sendo SQLite.
+
+```text
+Frontend futuro
+  → login por e-mail/senha no Supabase Auth
+  → recebe access token
+  → envia Authorization: Bearer <token> para o Flask
+  → Flask consulta GET /auth/v1/user no Supabase
+  → Flask usa id e e-mail do usuário autenticado
+```
+
+A validação segue o endpoint de usuário documentado pelo Supabase em
+[JSON Web Tokens](https://supabase.com/docs/guides/auth/jwts). A configuração de
+e-mail/senha está na documentação de
+[Password-based Auth](https://supabase.com/docs/guides/auth/passwords).
+
+Variáveis necessárias:
+
+```text
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_PUBLIC_KEY=sua-chave-publica
+```
+
+Use somente a chave pública `publishable` ou `anon` adequada ao projeto. Nunca use
+`service_role` no frontend ou no repositório. O GlobalScore não recebe nem armazena
+senhas. Ausência ou rejeição do token retorna HTTP 401; indisponibilidade do
+Supabase retorna HTTP 503.
+
+O Swagger permanece público em `/docs` e permite informar o Bearer token no botão
+**Authorize**. A rota `/sistema/saude` também é pública. Nesta etapa, somente as
+rotas `/importacoes` e `GET /autenticacao/me` exigem autenticação. A identidade
+validada pelo Supabase preenche `criado_por` nos novos lotes.

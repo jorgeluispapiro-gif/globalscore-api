@@ -6,6 +6,14 @@ api = Api(
     version="1.0",
     description="API para avaliações comparativas com bases percentílicas congeladas.",
     doc="/docs",
+    authorizations={
+        "Bearer": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "Authorization",
+            "description": "Informe: Bearer <access_token do Supabase>",
+        }
+    },
 )
 
 
@@ -14,6 +22,7 @@ def registrar_namespaces():
 
     from app.api.rotas import (
         namespace_avaliacoes,
+        namespace_autenticacao,
         namespace_bases,
         namespace_entidades,
         namespace_grupos,
@@ -25,6 +34,7 @@ def registrar_namespaces():
     )
 
     api.add_namespace(namespace_sistema)
+    api.add_namespace(namespace_autenticacao)
     api.add_namespace(namespace_projetos)
     api.add_namespace(namespace_grupos)
     api.add_namespace(namespace_entidades)

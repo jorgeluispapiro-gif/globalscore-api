@@ -18,6 +18,12 @@ class Configuracao:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JSON_SORT_KEYS = False
     MAX_CONTENT_LENGTH = 10 * 1024 * 1024
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_PUBLIC_KEY = os.getenv("SUPABASE_PUBLIC_KEY")
+    SUPABASE_AUTH_TIMEOUT_SEGUNDOS = float(
+        os.getenv("SUPABASE_AUTH_TIMEOUT_SEGUNDOS", "5")
+    )
+    AUTENTICACAO_OBRIGATORIA = True
 
 
 class ConfiguracaoTeste(Configuracao):
@@ -25,3 +31,5 @@ class ConfiguracaoTeste(Configuracao):
 
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    # Mantém os testes anteriores isolados; os testes de autenticação reativam a proteção.
+    AUTENTICACAO_OBRIGATORIA = False
