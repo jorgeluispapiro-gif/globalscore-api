@@ -169,6 +169,7 @@ def _ler_linhas(importacao, configuracao):
         raise ValueError("O arquivo temporário desta importação não está mais disponível.")
 
     formulas_sem_valor = set()
+    formatos_celulas = {}
     if importacao.tipo_arquivo == "CSV":
         delimitador = configuracao.get("delimitador")
         if not delimitador:
@@ -191,6 +192,7 @@ def _ler_linhas(importacao, configuracao):
                 valores_linha = [celula.value for celula in linha]
                 linhas.append(valores_linha)
                 for coluna, celula in enumerate(livro_bruto[aba][numero], start=1):
+                    formatos_celulas[(numero, coluna)] = celula.number_format
                     if celula.data_type == "f" and valores_linha[coluna - 1] is None:
                         formulas_sem_valor.add((numero, coluna))
         finally:
@@ -209,7 +211,7 @@ def _ler_linhas(importacao, configuracao):
         if all(valor in (None, "") for valor in valores.values()):
             continue
         registros.append({"linha": numero, "valores": valores})
-    return nomes, indices, registros, formulas_sem_valor
+    return nomes, indices, registros, formulas_sem_valor, formatos_celulas
 
 
 def _problema(tipo, mensagem, linha=None, coluna=None, valor=None):
@@ -244,36 +246,60 @@ def normalizar_periodo(valor, formato=None):
     return f"{ano:04d}-{mes:02d}"
 
 
-def normalizar_numero(valor, configuracao):
+def normalizar_numero(valor, configuracao, percentual_excel=False):
     if valor in (None, ""):
         return None
     if isinstance(valor, (int, float, Decimal)):
-        return Decimal(str(valor))
-    texto = str(valor).strip()
-    if not texto:
-        return None
-    percentual = "%" in texto
-    texto = texto.replace("%", "")
-    for simbolo in configuracao.get("simbolos_monetarios", ["R$"]):
-        texto = texto.replace(simbolo, "")
-    texto = texto.replace(" ", "")
-    milhar = configuracao.get("separador_milhar")
-    decimal = configuracao.get("separador_decimal", ".")
-    if milhar:
-        texto = texto.replace(milhar, "")
-    if decimal != ".":
-        texto = texto.replace(decimal, ".")
-    try:
-        numero = Decimal(texto)
-    except InvalidOperation as erro:
-        raise ValueError("Valor numérico inválido.") from erro
-    if percentual:
+        numero = Decimal(str(valor))
+        percentual_textual = False
+    else:
+        texto = str(valor).strip()
+        if not texto:
+            return None
+        percentual_textual = "%" in texto
+        texto = texto.replace("%", "")
+        for simbolo in configuracao.get("simbolos_monetarios", ["R$"]):
+            texto = texto.replace(simbolo, "")
+        texto = texto.replace(" ", "")
+        milhar = configuracao.get("separador_milhar")
+        decimal = configuracao.get("separador_decimal", ".")
+        if milhar:
+            texto = texto.replace(milhar, "")
+        if decimal != ".":
+            texto = texto.replace(decimal, ".")
+        try:
+            numero = Decimal(texto)
+        except InvalidOperation as erro:
+            raise ValueError("Valor numérico inválido.") from erro
+    if percentual_textual or percentual_excel:
         modo = configuracao.get("percentual_como")
         if modo not in {"NUMERO", "FRACAO"}:
             raise ValueError("Confirme se percentuais devem ser NUMERO ou FRACAO.")
-        if modo == "FRACAO":
+        if percentual_textual and modo == "FRACAO":
             numero /= Decimal("100")
+        elif percentual_excel and modo == "NUMERO":
+            numero *= Decimal("100")
     return numero
+
+
+def normalizar_codigo_entidade(valor, formato_excel=None, origem_xlsx=False):
+    """Preserva códigos numéricos somente para formatos XLSX simples como 000."""
+
+    if valor in (None, ""):
+        return ""
+    if not origem_xlsx or not isinstance(valor, (int, float, Decimal)):
+        return str(valor).strip()
+    numero = Decimal(str(valor))
+    if numero != numero.to_integral_value():
+        raise ValueError("Código numérico de entidade não pode possuir casas decimais.")
+    inteiro = int(numero)
+    if formato_excel and re.fullmatch(r"0+", formato_excel):
+        return str(inteiro).zfill(len(formato_excel))
+    if formato_excel in {None, "", "General"}:
+        return str(inteiro)
+    raise ValueError(
+        "Formato complexo no código da entidade; converta a coluna para texto ou use apenas zeros."
+    )
 
 
 def _validar_dados_novo_indicador(dados, projeto_id, problemas, coluna):
@@ -358,7 +384,9 @@ def _resolver_indicador(importacao, decisao, problemas, coluna):
 def _executar_validacao(importacao, payload):
     configuracao = payload.get("configuracao_leitura", {})
     mapeamento = payload.get("mapeamento", {})
-    nomes, indices, registros, formulas_sem_valor = _ler_linhas(importacao, configuracao)
+    nomes, indices, registros, formulas_sem_valor, formatos_celulas = _ler_linhas(
+        importacao, configuracao
+    )
     mapa_colunas = {int(item["indice_coluna"]): item for item in mapeamento.get("colunas", [])}
     formato = mapeamento.get("formato")
     problemas = []
@@ -381,7 +409,19 @@ def _executar_validacao(importacao, payload):
 
     for registro in registros:
         linha, valores = registro["linha"], registro["valores"]
-        codigo = valores.get(papeis["CODIGO_ENTIDADE"])
+        coluna_codigo = papeis["CODIGO_ENTIDADE"]
+        codigo_original = valores.get(coluna_codigo)
+        try:
+            codigo = normalizar_codigo_entidade(
+                codigo_original,
+                formatos_celulas.get((linha, coluna_codigo)),
+                importacao.tipo_arquivo == "XLSX",
+            )
+        except ValueError as erro:
+            problemas.append(
+                _problema("VALOR_INVALIDO", str(erro), linha, coluna_codigo, codigo_original)
+            )
+            continue
         nome = valores.get(papeis.get("NOME_ENTIDADE")) if papeis.get("NOME_ENTIDADE") else None
         entidade_ref = _resolver_entidade(importacao, codigo, nome, mapeamento.get("decisoes_entidades", {}), problemas, linha)
         if not entidade_ref or entidade_ref["tipo"] == "IGNORAR":
@@ -421,7 +461,12 @@ def _executar_validacao(importacao, payload):
             if indicador_ref["tipo"] == "NOVO":
                 indicadores_novos[indicador_ref["codigo"]] = indicador_ref
             try:
-                valor = normalizar_numero(valor_original, configuracao.get("formato_numerico", {}))
+                formato_excel = formatos_celulas.get((linha, coluna), "")
+                valor = normalizar_numero(
+                    valor_original,
+                    configuracao.get("formato_numerico", {}),
+                    importacao.tipo_arquivo == "XLSX" and "%" in formato_excel,
+                )
             except ValueError as erro:
                 problemas.append(_problema("VALOR_INVALIDO", str(erro), linha, coluna, valor_original))
                 continue

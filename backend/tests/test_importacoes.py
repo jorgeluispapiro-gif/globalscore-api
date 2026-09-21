@@ -116,6 +116,57 @@ def test_xlsx_valido_cria_observacao(ambiente):
     assert cliente.post(f"/importacoes/{importacao_id}/confirmar").status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("percentual_como", "valor_esperado"),
+    [("FRACAO", 0.15), ("NUMERO", 15.0)],
+)
+def test_xlsx_respeita_formato_percentual(ambiente, percentual_como, valor_esperado):
+    _, cliente, projeto_id, _, entidade_id, indicador_id = ambiente
+    livro = Workbook()
+    planilha = livro.active
+    planilha.title = "Dados"
+    planilha.append(["codigo", "periodo", "taxa"])
+    planilha.append(["001", "03/2026", 0.15])
+    planilha["C2"].number_format = "0%"
+    arquivo = io.BytesIO()
+    livro.save(arquivo)
+
+    importacao_id = enviar(cliente, projeto_id, "percentual.xlsx", arquivo.getvalue())
+    payload = payload_largo(indicador_id)
+    payload["configuracao_leitura"].pop("delimitador")
+    payload["configuracao_leitura"]["aba"] = "Dados"
+    payload["configuracao_leitura"]["formato_numerico"]["percentual_como"] = percentual_como
+    assert cliente.post(f"/importacoes/{importacao_id}/validar", json=payload).get_json()["status"] == "VALIDADA"
+    assert cliente.post(f"/importacoes/{importacao_id}/confirmar").status_code == 200
+
+    observacao = Observacao.query.filter_by(entidade_id=entidade_id, indicador_id=indicador_id).one()
+    assert float(observacao.valor) == valor_esperado
+
+
+def test_xlsx_preserva_zero_a_esquerda_no_codigo(ambiente):
+    _, cliente, projeto_id, _, entidade_id, indicador_id = ambiente
+    livro = Workbook()
+    planilha = livro.active
+    planilha.title = "Dados"
+    planilha.append(["codigo", "periodo", "vendas"])
+    planilha.append([1, "04/2026", 300])
+    planilha["A2"].number_format = "000"
+    arquivo = io.BytesIO()
+    livro.save(arquivo)
+
+    importacao_id = enviar(cliente, projeto_id, "codigo.xlsx", arquivo.getvalue())
+    payload = payload_largo(indicador_id)
+    payload["configuracao_leitura"].pop("delimitador")
+    payload["configuracao_leitura"]["aba"] = "Dados"
+    validacao = cliente.post(f"/importacoes/{importacao_id}/validar", json=payload)
+    assert validacao.get_json()["status"] == "VALIDADA"
+    assert validacao.get_json()["entidades_reconhecidas"] == 1
+    assert cliente.post(f"/importacoes/{importacao_id}/confirmar").status_code == 200
+
+    observacao = Observacao.query.filter_by(entidade_id=entidade_id, indicador_id=indicador_id).one()
+    assert float(observacao.valor) == 300
+
+
 def test_celula_vazia_nao_vira_zero(ambiente):
     _, cliente, projeto_id, _, _, indicador_id = ambiente
     importacao_id = enviar(cliente, projeto_id, "vazio.csv", b"codigo;periodo;vendas\n001;01/2026;\n")
