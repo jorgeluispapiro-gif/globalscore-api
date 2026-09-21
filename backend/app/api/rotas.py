@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from flask import request
-from flask_restx import Namespace, Resource, fields
+from flask_restx import Namespace, Resource, fields, reqparse
 from sqlalchemy.exc import IntegrityError
 
 from app.extensoes import banco
@@ -12,6 +12,7 @@ from app.modelos import (
     GrupoComparavel,
     Indicador,
     IndicadorBaseReferencia,
+    Importacao,
     Observacao,
     Projeto,
 )
@@ -22,6 +23,13 @@ from app.servicos.bases_referencia import (
     processar_base_referencia,
     validar_configuracao_base,
 )
+from app.servicos.importacoes import (
+    confirmar_importacao,
+    importacao_para_dict,
+    receber_arquivo,
+    validar_importacao,
+)
+from werkzeug.datastructures import FileStorage
 
 
 namespace_sistema = Namespace("sistema", description="Estado da aplicação")
@@ -32,6 +40,21 @@ namespace_indicadores = Namespace("indicadores", description="CRUD de indicadore
 namespace_observacoes = Namespace("observacoes", description="Consulta e entrada manual de valores")
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
 namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global Score")
+namespace_importacoes = Namespace("importacoes", description="Importação assistida de CSV e XLSX")
+
+
+parser_upload = reqparse.RequestParser()
+parser_upload.add_argument("projeto_id", type=int, required=True, location="form")
+parser_upload.add_argument("criado_por", type=str, location="form", default="sistema")
+parser_upload.add_argument("arquivo", type=FileStorage, required=True, location="files")
+
+modelo_validacao_importacao = namespace_importacoes.model(
+    "ValidacaoImportacaoEntrada",
+    {
+        "configuracao_leitura": fields.Raw(required=True),
+        "mapeamento": fields.Raw(required=True),
+    },
+)
 
 
 modelo_projeto = namespace_projetos.model(
@@ -585,6 +608,64 @@ class ObservacoesResource(Resource):
             "Já existe uma observação para essa entidade, indicador e período.",
         )
         return observacao_para_dict(observacao), 201
+
+
+@namespace_importacoes.route("")
+class ImportacoesResource(Resource):
+    @namespace_importacoes.expect(parser_upload)
+    def post(self):
+        """Recebe arquivo temporário e devolve uma inspeção sem decidir o mapeamento."""
+
+        dados = parser_upload.parse_args()
+        try:
+            importacao, preview = receber_arquivo(
+                dados["projeto_id"], dados["arquivo"], dados.get("criado_por") or "sistema"
+            )
+            resposta = importacao_para_dict(importacao)
+            resposta["inspecao"] = preview
+            return resposta, 201
+        except (ValueError, UnicodeDecodeError) as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(400, str(erro))
+
+
+@namespace_importacoes.route("/<int:importacao_id>")
+class ImportacaoResource(Resource):
+    def get(self, importacao_id):
+        """Consulta somente metadados e resultados; o arquivo e seu caminho são privados."""
+
+        importacao = banco.session.get(Importacao, importacao_id)
+        if importacao is None:
+            namespace_importacoes.abort(404, "Importação não encontrada.")
+        return importacao_para_dict(importacao)
+
+
+@namespace_importacoes.route("/<int:importacao_id>/validar")
+class ValidarImportacaoResource(Resource):
+    @namespace_importacoes.expect(modelo_validacao_importacao, validate=True)
+    def post(self, importacao_id):
+        """Executa o dry-run e não grava entidades, indicadores ou observações."""
+
+        try:
+            return validar_importacao(importacao_id, request.json)
+        except ValueError as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(400, str(erro))
+
+
+@namespace_importacoes.route("/<int:importacao_id>/confirmar")
+class ConfirmarImportacaoResource(Resource):
+    def post(self, importacao_id):
+        """Confirma de forma atômica um lote previamente validado e sem erros."""
+
+        try:
+            importacao, quantidade = confirmar_importacao(importacao_id)
+            resposta = importacao_para_dict(importacao)
+            resposta["observacoes_criadas"] = quantidade
+            return resposta
+        except ValueError as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(400, str(erro))
 
 
 @namespace_bases.route("")

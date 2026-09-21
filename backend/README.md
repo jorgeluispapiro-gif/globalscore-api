@@ -10,6 +10,7 @@ Referência congeladas e calcular avaliações ponderadas.
 - Flask-SQLAlchemy
 - SQLite
 - Swagger
+- openpyxl, somente para leitura de XLSX
 
 ## Execução local
 
@@ -55,6 +56,10 @@ docker run --rm -p 5000:5000 -v globalscore_dados:/app/dados globalscore-api
 - `POST /bases/{id}/ativar`
 - `POST /avaliacoes`
 - `GET /avaliacoes/{id}`
+- `POST /importacoes` (multipart com `projeto_id` e `arquivo`)
+- `GET /importacoes/{id}`
+- `POST /importacoes/{id}/validar`
+- `POST /importacoes/{id}/confirmar`
 
 O `DELETE` de Indicadores é lógico: o registro é desativado para preservar o
 histórico já calculado.
@@ -67,3 +72,47 @@ As listagens aceitam filtros por parâmetros de consulta:
 
 Entidades também são desativadas de forma lógica enviando `{"ativa": false}` em
 `PATCH /entidades/{id}`.
+
+## Importação assistida
+
+O MVP aceita apenas CSV e XLSX, com limite de 10 MB. A importação possui três
+etapas e nunca interpreta silenciosamente o significado das colunas:
+
+1. `POST /importacoes` guarda o arquivo temporariamente e devolve preview, abas e
+   sugestão de delimitador quando aplicável;
+2. `POST /importacoes/{id}/validar` recebe a região escolhida, formato numérico,
+   formato do período e mapeamento explícito, realizando um dry-run;
+3. `POST /importacoes/{id}/confirmar` grava o lote validado em uma única transação.
+
+Exemplo mínimo de configuração e mapeamento para CSV largo:
+
+```json
+{
+  "configuracao_leitura": {
+    "linha_inicial": 2,
+    "linhas_cabecalho": [1],
+    "colunas_utilizadas": [1, 2, 3],
+    "delimitador": ";",
+    "formato_periodo": "MM/AAAA",
+    "formato_numerico": {
+      "separador_decimal": ",",
+      "separador_milhar": "."
+    }
+  },
+  "mapeamento": {
+    "formato": "LARGO",
+    "colunas": [
+      {"indice_coluna": 1, "papel": "CODIGO_ENTIDADE"},
+      {"indice_coluna": 2, "papel": "PERIODO"},
+      {
+        "indice_coluna": 3,
+        "papel": "VALOR_INDICADOR",
+        "indicador": {"acao": "ASSOCIAR", "indicador_id": 1}
+      }
+    ]
+  }
+}
+```
+
+Células vazias não geram observações. Duplicidades são relatadas no dry-run e
+impedem a confirmação. O arquivo temporário é removido depois da conclusão.

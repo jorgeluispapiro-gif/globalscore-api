@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from flask import Flask
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from app.api import api, registrar_namespaces
 from app.configuracao import Configuracao
@@ -18,8 +19,15 @@ def criar_aplicacao(configuracao=Configuracao):
         Path(caminho_banco.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
 
     banco.init_app(aplicacao)
+    aplicacao.config["DIRETORIO_IMPORTACOES_TEMPORARIAS"].mkdir(parents=True, exist_ok=True)
     registrar_namespaces()
     api.init_app(aplicacao)
+
+    @aplicacao.errorhandler(RequestEntityTooLarge)
+    def tratar_upload_muito_grande(_erro):
+        """Mantém o limite de upload compreensível também fora do Swagger."""
+
+        return {"message": "O arquivo excede o limite de 10 MB."}, 413
 
     with aplicacao.app_context():
         # Importar modelos registra as tabelas no metadado antes do create_all.
@@ -28,4 +36,3 @@ def criar_aplicacao(configuracao=Configuracao):
         banco.create_all()
 
     return aplicacao
-

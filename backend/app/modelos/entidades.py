@@ -113,6 +113,35 @@ class Observacao(banco.Model):
     indicador = banco.relationship("Indicador", backref="observacoes")
 
 
+class Importacao(banco.Model):
+    """Rastreia o lote e mantém o arquivo apenas durante o fluxo assistido."""
+
+    __tablename__ = "importacoes"
+
+    id = banco.Column(banco.Integer, primary_key=True)
+    projeto_id = banco.Column(banco.ForeignKey("projetos.id"), nullable=False, index=True)
+    nome_arquivo_original = banco.Column(banco.String(255), nullable=False)
+    tipo_arquivo = banco.Column(banco.String(10), nullable=False)
+    hash_sha256 = banco.Column(banco.String(64), nullable=False, index=True)
+    status = banco.Column(banco.String(20), nullable=False, default="ENVIADA")
+    aba_selecionada = banco.Column(banco.String(255))
+    configuracao_leitura_json = banco.Column(banco.Text)
+    mapeamento_json = banco.Column(banco.Text)
+    quantidade_linhas_lidas = banco.Column(banco.Integer, nullable=False, default=0)
+    quantidade_linhas_validas = banco.Column(banco.Integer, nullable=False, default=0)
+    quantidade_erros = banco.Column(banco.Integer, nullable=False, default=0)
+    resumo_erros_json = banco.Column(banco.Text)
+    criado_por = banco.Column(banco.String(120), nullable=False, default="sistema")
+    criado_em = banco.Column(banco.DateTime(timezone=True), nullable=False, default=agora_utc)
+    validado_em = banco.Column(banco.DateTime(timezone=True))
+    concluido_em = banco.Column(banco.DateTime(timezone=True))
+
+    # Campo exclusivamente interno; nunca é devolvido pela API.
+    caminho_arquivo_temporario = banco.Column(banco.Text)
+
+    projeto = banco.relationship("Projeto", backref="importacoes")
+
+
 class BaseReferencia(banco.Model):
     __tablename__ = "bases_referencia"
     __table_args__ = (

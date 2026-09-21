@@ -5,6 +5,7 @@ from app.modelos.entidades import (
     GrupoComparavel,
     Indicador,
     IndicadorBaseReferencia,
+    Importacao,
     ItemAvaliacao,
     ItemPopulacaoReferencia,
     Observacao,
@@ -20,6 +21,7 @@ __all__ = [
     "GrupoComparavel",
     "Indicador",
     "IndicadorBaseReferencia",
+    "Importacao",
     "ItemAvaliacao",
     "ItemPopulacaoReferencia",
     "Observacao",
@@ -27,4 +29,3 @@ __all__ = [
     "ReguaPercentil",
     "ValorConsolidadoBase",
 ]
-
