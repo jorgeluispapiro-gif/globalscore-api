@@ -102,7 +102,7 @@ class Observacao(banco.Model):
     periodo = banco.Column(banco.String(7), nullable=False, index=True)
     valor = banco.Column(banco.Numeric(20, 6), nullable=False)
     origem = banco.Column(banco.String(20), nullable=False, default="MANUAL")
-    importacao_id = banco.Column(banco.Integer)
+    importacao_id = banco.Column(banco.ForeignKey("importacoes.id"), index=True)
     criado_por = banco.Column(banco.String(120), nullable=False, default="sistema")
     criado_em = banco.Column(banco.DateTime(timezone=True), nullable=False, default=agora_utc)
     atualizado_em = banco.Column(
@@ -131,6 +131,8 @@ class Importacao(banco.Model):
     quantidade_linhas_validas = banco.Column(banco.Integer, nullable=False, default=0)
     quantidade_erros = banco.Column(banco.Integer, nullable=False, default=0)
     resumo_erros_json = banco.Column(banco.Text)
+    quantidade_alertas = banco.Column(banco.Integer, nullable=False, default=0)
+    resumo_alertas_json = banco.Column(banco.Text)
     criado_por = banco.Column(banco.String(120), nullable=False, default="sistema")
     criado_em = banco.Column(banco.DateTime(timezone=True), nullable=False, default=agora_utc)
     validado_em = banco.Column(banco.DateTime(timezone=True))
@@ -140,6 +142,7 @@ class Importacao(banco.Model):
     caminho_arquivo_temporario = banco.Column(banco.Text)
 
     projeto = banco.relationship("Projeto", backref="importacoes")
+    observacoes = banco.relationship("Observacao", backref="importacao", lazy=True)
 
 
 class BaseReferencia(banco.Model):

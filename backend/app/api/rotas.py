@@ -24,6 +24,9 @@ from app.servicos.bases_referencia import (
     validar_configuracao_base,
 )
 from app.servicos.importacoes import (
+    AlertasPendentesError,
+    DependenciasImportacaoError,
+    anular_importacao,
     confirmar_importacao,
     importacao_para_dict,
     receber_arquivo,
@@ -53,6 +56,16 @@ modelo_validacao_importacao = namespace_importacoes.model(
     {
         "configuracao_leitura": fields.Raw(required=True),
         "mapeamento": fields.Raw(required=True),
+    },
+)
+
+modelo_confirmacao_importacao = namespace_importacoes.model(
+    "ConfirmacaoImportacaoEntrada",
+    {
+        "confirmar_alertas": fields.Boolean(
+            default=False,
+            description="Aceite explícito dos alertas de qualidade apresentados no dry-run.",
+        )
     },
 )
 
@@ -212,6 +225,7 @@ def observacao_para_dict(observacao):
         "periodo": observacao.periodo,
         "valor": float(observacao.valor),
         "origem": observacao.origem,
+        "importacao_id": observacao.importacao_id,
     }
 
 
@@ -655,14 +669,59 @@ class ValidarImportacaoResource(Resource):
 
 @namespace_importacoes.route("/<int:importacao_id>/confirmar")
 class ConfirmarImportacaoResource(Resource):
+    @namespace_importacoes.expect(modelo_confirmacao_importacao, validate=False)
     def post(self, importacao_id):
-        """Confirma de forma atômica um lote previamente validado e sem erros."""
+        """Confirma atomicamente; alertas exigem aceite explícito do gestor."""
 
         try:
-            importacao, quantidade = confirmar_importacao(importacao_id)
+            dados = request.get_json(silent=True) or {}
+            importacao, quantidade = confirmar_importacao(
+                importacao_id, dados.get("confirmar_alertas") is True
+            )
             resposta = importacao_para_dict(importacao)
             resposta["observacoes_criadas"] = quantidade
             return resposta
+        except AlertasPendentesError as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(409, str(erro))
+        except ValueError as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(400, str(erro))
+
+
+@namespace_importacoes.route("/<int:importacao_id>/observacoes")
+class ObservacoesImportacaoResource(Resource):
+    def get(self, importacao_id):
+        """Lista os registros gravados por um lote para garantir rastreabilidade."""
+
+        if banco.session.get(Importacao, importacao_id) is None:
+            namespace_importacoes.abort(404, "Importação não encontrada.")
+        observacoes = Observacao.query.filter_by(importacao_id=importacao_id).order_by(
+            Observacao.id
+        )
+        return [observacao_para_dict(item) for item in observacoes]
+
+
+@namespace_importacoes.route("/<int:importacao_id>/anular")
+class AnularImportacaoResource(Resource):
+    def post(self, importacao_id):
+        """Cancela lote pendente ou anula lote concluído que ainda não foi consumido."""
+
+        try:
+            importacao, quantidade = anular_importacao(importacao_id)
+            resposta = importacao_para_dict(importacao)
+            resposta["observacoes_removidas"] = quantidade
+            return resposta
+        except DependenciasImportacaoError as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(
+                409,
+                str(erro),
+                quantidade_bases_dependentes=len(erro.bases),
+                quantidade_avaliacoes_dependentes=len(erro.avaliacoes),
+                bases_dependentes=erro.bases,
+                avaliacoes_dependentes=erro.avaliacoes,
+            )
         except ValueError as erro:
             banco.session.rollback()
             namespace_importacoes.abort(400, str(erro))

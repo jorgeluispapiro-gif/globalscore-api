@@ -84,6 +84,18 @@ etapas e nunca interpreta silenciosamente o significado das colunas:
    formato do período e mapeamento explícito, realizando um dry-run;
 3. `POST /importacoes/{id}/confirmar` grava o lote validado em uma única transação.
 
+O dry-run separa erros bloqueantes de alertas de qualidade. Valores extremos são
+identificados pelos limites de 3 IQR, tanto dentro do lote quanto no histórico do
+mesmo indicador e grupo, quando existem ao menos cinco valores e IQR diferente de
+zero. Um lote `VALIDADA_COM_ALERTAS` exige a confirmação explícita
+`{"confirmar_alertas": true}`; os valores aceitos são preservados sem alteração.
+
+Para auditoria, `GET /importacoes/{id}/observacoes` lista as observações criadas
+pelo lote. `POST /importacoes/{id}/anular` cancela um lote ainda não concluído ou
+remove atomicamente as observações de um lote concluído sem uso. Se uma Base de
+Referência ou Avaliação materializada depender dele, a API responde HTTP 409 e
+preserva os dados.
+
 Exemplo mínimo de configuração e mapeamento para CSV largo:
 
 ```json

@@ -15,8 +15,21 @@ from openpyxl import load_workbook
 from werkzeug.utils import secure_filename
 
 from app.extensoes import banco
-from app.modelos import Entidade, GrupoComparavel, Importacao, Indicador, Observacao, Projeto
+from app.modelos import (
+    Avaliacao,
+    BaseReferencia,
+    Entidade,
+    GrupoComparavel,
+    Importacao,
+    Indicador,
+    ItemAvaliacao,
+    ItemPopulacaoReferencia,
+    Observacao,
+    Projeto,
+    ValorConsolidadoBase,
+)
 from app.modelos.entidades import agora_utc
+from app.servicos.motor_percentil import calcular_percentil_inc
 
 
 FORMATOS_ACEITOS = {".csv": "CSV", ".xlsx": "XLSX"}
@@ -27,6 +40,21 @@ MESES = {
     "setembro": 9, "out": 10, "outubro": 10, "nov": 11, "novembro": 11,
     "dez": 12, "dezembro": 12,
 }
+
+
+class AlertasPendentesError(ValueError):
+    """Indica que o gestor ainda não aceitou conscientemente os alertas."""
+
+
+class DependenciasImportacaoError(ValueError):
+    """Bloqueia a anulação quando resultados congelados usam o lote."""
+
+    def __init__(self, bases, avaliacoes):
+        self.bases = bases
+        self.avaliacoes = avaliacoes
+        super().__init__(
+            "A importação possui observações usadas por bases ou avaliações materializadas."
+        )
 
 
 def importacao_para_dict(importacao, incluir_resumo=True):
@@ -45,6 +73,7 @@ def importacao_para_dict(importacao, incluir_resumo=True):
         "quantidade_linhas_lidas": importacao.quantidade_linhas_lidas,
         "quantidade_linhas_validas": importacao.quantidade_linhas_validas,
         "quantidade_erros": importacao.quantidade_erros,
+        "quantidade_alertas": importacao.quantidade_alertas,
         "criado_por": importacao.criado_por,
         "criado_em": importacao.criado_em.isoformat(),
         "validado_em": importacao.validado_em.isoformat() if importacao.validado_em else None,
@@ -52,6 +81,7 @@ def importacao_para_dict(importacao, incluir_resumo=True):
     }
     if incluir_resumo:
         resposta["resumo_erros"] = _carregar_json(importacao.resumo_erros_json) or []
+        resposta["resumo_alertas"] = _carregar_json(importacao.resumo_alertas_json) or []
     return resposta
 
 
@@ -222,6 +252,102 @@ def _problema(tipo, mensagem, linha=None, coluna=None, valor=None):
         "tipo": tipo,
         "mensagem": mensagem,
     }
+
+
+def _estatisticas_iqr(valores):
+    """Calcula limites extremos de Tukey quando há amostra suficiente."""
+
+    if len(valores) < 5:
+        return None
+    q1 = calcular_percentil_inc(valores, 25)
+    q3 = calcular_percentil_inc(valores, 75)
+    mediana = calcular_percentil_inc(valores, 50)
+    iqr = q3 - q1
+    if iqr == 0:
+        return None
+    return {
+        "q1": q1,
+        "q3": q3,
+        "mediana": mediana,
+        "iqr": iqr,
+        "limite_inferior": q1 - Decimal("3") * iqr,
+        "limite_superior": q3 + Decimal("3") * iqr,
+        "tamanho_populacao": len(valores),
+    }
+
+
+def _identificacao(referencia):
+    return referencia.get("id") or referencia.get("codigo")
+
+
+def _montar_alerta(item, estatisticas, tipo):
+    return {
+        "tipo": tipo,
+        "linha": item["linha"],
+        "coluna": item["coluna"],
+        "entidade": _identificacao(item["entidade"]),
+        "indicador": _identificacao(item["indicador"]),
+        "periodo": item["periodo"],
+        "valor": str(item["valor"]),
+        "q1": str(estatisticas["q1"]),
+        "q3": str(estatisticas["q3"]),
+        "mediana": str(estatisticas["mediana"]),
+        "iqr": str(estatisticas["iqr"]),
+        "limite_inferior": str(estatisticas["limite_inferior"]),
+        "limite_superior": str(estatisticas["limite_superior"]),
+        "tamanho_populacao": estatisticas["tamanho_populacao"],
+    }
+
+
+def _valor_atipico(valor, estatisticas):
+    return valor < estatisticas["limite_inferior"] or valor > estatisticas["limite_superior"]
+
+
+def _detectar_alertas_lote(plano):
+    grupos = {}
+    for item in plano:
+        chave = (item["indicador"]["tipo"], _identificacao(item["indicador"]))
+        grupos.setdefault(chave, []).append(item)
+    alertas = []
+    for itens in grupos.values():
+        estatisticas = _estatisticas_iqr([item["valor"] for item in itens])
+        if estatisticas:
+            alertas.extend(
+                _montar_alerta(item, estatisticas, "VALOR_ATIPICO_LOTE")
+                for item in itens
+                if _valor_atipico(item["valor"], estatisticas)
+            )
+    return alertas
+
+
+def _detectar_alertas_historicos(importacao, plano):
+    """Compara somente indicadores existentes com o histórico do mesmo grupo."""
+
+    cache = {}
+    alertas = []
+    for item in plano:
+        if item["indicador"]["tipo"] != "EXISTENTE":
+            continue
+        if item["entidade"]["tipo"] == "EXISTENTE":
+            entidade = banco.session.get(Entidade, item["entidade"]["id"])
+            grupo_id = entidade.grupo_id
+        else:
+            grupo_id = item["entidade"]["grupo_id"]
+        chave = (item["indicador"]["id"], grupo_id)
+        if chave not in cache:
+            valores = [
+                observacao.valor
+                for observacao in Observacao.query.join(Entidade).filter(
+                    Observacao.projeto_id == importacao.projeto_id,
+                    Observacao.indicador_id == chave[0],
+                    Entidade.grupo_id == grupo_id,
+                )
+            ]
+            cache[chave] = _estatisticas_iqr(valores)
+        estatisticas = cache[chave]
+        if estatisticas and _valor_atipico(item["valor"], estatisticas):
+            alertas.append(_montar_alerta(item, estatisticas, "VALOR_ATIPICO_HISTORICO"))
+    return alertas
 
 
 def normalizar_periodo(valor, formato=None):
@@ -481,7 +607,9 @@ def _executar_validacao(importacao, payload):
                 if Observacao.query.filter_by(entidade_id=entidade_ref["id"], indicador_id=indicador_ref["id"], periodo=periodo).first():
                     problemas.append(_problema("DUPLICIDADE", "Já existe observação para entidade, indicador e período.", linha, coluna, valor_original))
                     continue
-            plano.append({"linha": linha, "entidade": entidade_ref, "indicador": indicador_ref, "periodo": periodo, "valor": valor})
+            plano.append({"linha": linha, "coluna": coluna, "entidade": entidade_ref, "indicador": indicador_ref, "periodo": periodo, "valor": valor})
+
+    alertas = _detectar_alertas_lote(plano) + _detectar_alertas_historicos(importacao, plano)
 
     resumo = {
         "linhas_lidas": len(registros),
@@ -493,11 +621,14 @@ def _executar_validacao(importacao, payload):
         "novos_indicadores": [item["dados"] for item in indicadores_novos.values()],
         "observacoes_a_criar": len(plano),
         "quantidade_erros": len(problemas),
+        "quantidade_alertas": len(alertas),
         "duplicidades": sum(item["tipo"] == "DUPLICIDADE" for item in problemas),
         "valores_invalidos": sum(item["tipo"] == "VALOR_INVALIDO" for item in problemas),
         "periodos_invalidos": sum(item["tipo"] == "PERIODO_INVALIDO" for item in problemas),
         "cabecalhos": [{"indice_coluna": indice, "nome": nome} for indice, nome in zip(indices, nomes)],
         "problemas": problemas,
+        "erros": problemas,
+        "alertas": alertas,
         "_plano": plano,
     }
     return resumo
@@ -507,8 +638,8 @@ def validar_importacao(importacao_id, payload):
     importacao = banco.session.get(Importacao, importacao_id)
     if importacao is None:
         raise ValueError("Importação não encontrada.")
-    if importacao.status == "CONCLUIDA":
-        raise ValueError("Uma importação concluída não pode ser revalidada.")
+    if importacao.status in {"CONCLUIDA", "ANULADA", "CANCELADA"}:
+        raise ValueError("Esta importação não pode ser revalidada em seu estado atual.")
     resumo = _executar_validacao(importacao, payload)
     importacao.aba_selecionada = payload.get("configuracao_leitura", {}).get("aba")
     importacao.configuracao_leitura_json = json.dumps(payload.get("configuracao_leitura", {}), ensure_ascii=False)
@@ -517,8 +648,15 @@ def validar_importacao(importacao_id, payload):
     importacao.quantidade_linhas_validas = resumo["linhas_validas"]
     importacao.quantidade_erros = resumo["quantidade_erros"]
     importacao.resumo_erros_json = json.dumps(resumo["problemas"], ensure_ascii=False, default=str)
+    importacao.quantidade_alertas = resumo["quantidade_alertas"]
+    importacao.resumo_alertas_json = json.dumps(resumo["alertas"], ensure_ascii=False)
     importacao.validado_em = agora_utc()
-    importacao.status = "VALIDADA" if not resumo["problemas"] else "ANALISADA"
+    if resumo["problemas"]:
+        importacao.status = "ANALISADA"
+    elif resumo["alertas"]:
+        importacao.status = "VALIDADA_COM_ALERTAS"
+    else:
+        importacao.status = "VALIDADA"
     banco.session.commit()
     resumo.pop("_plano")
     resumo["status"] = importacao.status
@@ -531,12 +669,16 @@ def persistir_observacao(**dados):
     banco.session.add(Observacao(**dados))
 
 
-def confirmar_importacao(importacao_id):
+def confirmar_importacao(importacao_id, confirmar_alertas=False):
     importacao = banco.session.get(Importacao, importacao_id)
     if importacao is None:
         raise ValueError("Importação não encontrada.")
-    if importacao.status != "VALIDADA":
+    if importacao.status not in {"VALIDADA", "VALIDADA_COM_ALERTAS"}:
         raise ValueError("A importação precisa estar validada e sem erros antes da confirmação.")
+    if importacao.status == "VALIDADA_COM_ALERTAS" and confirmar_alertas is not True:
+        raise AlertasPendentesError(
+            "A importação possui alertas. Envie confirmar_alertas=true para aceitá-los."
+        )
     payload = {
         "configuracao_leitura": _carregar_json(importacao.configuracao_leitura_json) or {},
         "mapeamento": _carregar_json(importacao.mapeamento_json) or {},
@@ -544,6 +686,10 @@ def confirmar_importacao(importacao_id):
     resumo = _executar_validacao(importacao, payload)
     if resumo["problemas"]:
         raise ValueError("A importação deixou de ser válida; execute a validação novamente.")
+    if resumo["alertas"] and confirmar_alertas is not True:
+        raise AlertasPendentesError(
+            "A importação possui alertas. Envie confirmar_alertas=true para aceitá-los."
+        )
 
     entidades_criadas = {}
     indicadores_criados = {}
@@ -598,8 +744,86 @@ def confirmar_importacao(importacao_id):
         banco.session.commit()
         raise
 
-    caminho = Path(importacao.caminho_arquivo_temporario or "")
-    caminho.unlink(missing_ok=True)
+    _remover_arquivo_temporario(importacao)
     importacao.caminho_arquivo_temporario = None
     banco.session.commit()
     return importacao, len(resumo["_plano"])
+
+
+def _remover_arquivo_temporario(importacao):
+    if importacao.caminho_arquivo_temporario:
+        Path(importacao.caminho_arquivo_temporario).unlink(missing_ok=True)
+
+
+def _dependencias_materializadas(importacao):
+    """Localiza bases e avaliações que realmente consumiram observações do lote."""
+
+    bases = set()
+    avaliacoes = set()
+    observacoes = Observacao.query.filter_by(importacao_id=importacao.id).all()
+    for observacao in observacoes:
+        itens_diretos = ItemPopulacaoReferencia.query.join(
+            BaseReferencia, BaseReferencia.id == ItemPopulacaoReferencia.base_referencia_id
+        ).filter(
+            ItemPopulacaoReferencia.entidade_id == observacao.entidade_id,
+            ItemPopulacaoReferencia.indicador_id == observacao.indicador_id,
+            ItemPopulacaoReferencia.periodo == observacao.periodo,
+            BaseReferencia.status.in_(["PROCESSADA", "ATIVA", "SUBSTITUIDA"]),
+        )
+        bases.update(item.base_referencia_id for item in itens_diretos)
+
+        consolidados = ValorConsolidadoBase.query.join(
+            BaseReferencia, BaseReferencia.id == ValorConsolidadoBase.base_referencia_id
+        ).filter(
+            ValorConsolidadoBase.entidade_id == observacao.entidade_id,
+            ValorConsolidadoBase.indicador_id == observacao.indicador_id,
+            ValorConsolidadoBase.status_cobertura == "ELEGIVEL",
+            BaseReferencia.periodo_inicial <= observacao.periodo,
+            BaseReferencia.periodo_final >= observacao.periodo,
+            BaseReferencia.status.in_(["PROCESSADA", "ATIVA", "SUBSTITUIDA"]),
+        )
+        for consolidado in consolidados:
+            materializado = ItemPopulacaoReferencia.query.filter_by(
+                base_referencia_id=consolidado.base_referencia_id,
+                entidade_id=observacao.entidade_id,
+                indicador_id=observacao.indicador_id,
+                origem="MEDIA_ENTIDADE",
+            ).first()
+            if materializado:
+                bases.add(consolidado.base_referencia_id)
+
+        itens_avaliacao = ItemAvaliacao.query.join(Avaliacao).filter(
+            Avaliacao.entidade_id == observacao.entidade_id,
+            Avaliacao.periodo == observacao.periodo,
+            Avaliacao.status == "CALCULADA",
+            ItemAvaliacao.indicador_id == observacao.indicador_id,
+            ItemAvaliacao.valor_observado.is_not(None),
+        )
+        avaliacoes.update(item.avaliacao_id for item in itens_avaliacao)
+    return sorted(bases), sorted(avaliacoes)
+
+
+def anular_importacao(importacao_id):
+    importacao = banco.session.get(Importacao, importacao_id)
+    if importacao is None:
+        raise ValueError("Importação não encontrada.")
+    if importacao.status in {"ENVIADA", "ANALISADA", "VALIDADA", "VALIDADA_COM_ALERTAS"}:
+        _remover_arquivo_temporario(importacao)
+        importacao.caminho_arquivo_temporario = None
+        importacao.status = "CANCELADA"
+        banco.session.commit()
+        return importacao, 0
+    if importacao.status != "CONCLUIDA":
+        raise ValueError("A importação já está anulada, cancelada ou falhou.")
+
+    bases, avaliacoes = _dependencias_materializadas(importacao)
+    if bases or avaliacoes:
+        raise DependenciasImportacaoError(bases, avaliacoes)
+    try:
+        quantidade = Observacao.query.filter_by(importacao_id=importacao.id).delete()
+        importacao.status = "ANULADA"
+        banco.session.commit()
+        return importacao, quantidade
+    except Exception:
+        banco.session.rollback()
+        raise

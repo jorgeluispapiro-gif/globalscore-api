@@ -88,6 +88,22 @@ def enviar(cliente, projeto_id, nome, conteudo):
     return resposta.get_json()["id"]
 
 
+def preparar_lote_atipico(cliente, projeto_id, indicador_id):
+    """Cria uma amostra simples cujo último valor ultrapassa 3 IQR."""
+
+    valores = [4, 10, 20, 40, 60, 80, 100, 10000]
+    linhas = ["codigo;periodo;vendas"] + [
+        f"001;{mes:02d}/2026;{valor}" for mes, valor in enumerate(valores, start=1)
+    ]
+    importacao_id = enviar(
+        cliente, projeto_id, "atipico.csv", ("\n".join(linhas) + "\n").encode()
+    )
+    resposta = cliente.post(
+        f"/importacoes/{importacao_id}/validar", json=payload_largo(indicador_id)
+    )
+    return importacao_id, resposta
+
+
 def test_csv_valido_cria_observacao(ambiente):
     _, cliente, projeto_id, _, entidade_id, indicador_id = ambiente
     importacao_id = enviar(cliente, projeto_id, "dados.csv", b"codigo;periodo;vendas\n001;01/2026;1.234,56\n")
@@ -215,3 +231,103 @@ def test_erro_na_confirmacao_desfaz_todo_o_lote(ambiente, monkeypatch):
         servico_importacoes.confirmar_importacao(importacao_id)
     assert Observacao.query.count() == 0
     assert banco.session.get(Importacao, importacao_id).status == "FALHA"
+
+
+def test_detecta_valor_atipico_no_lote(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    _, resposta = preparar_lote_atipico(cliente, projeto_id, indicador_id)
+    dados = resposta.get_json()
+    assert dados["status"] == "VALIDADA_COM_ALERTAS"
+    assert dados["quantidade_alertas"] == 1
+    assert dados["alertas"][0]["tipo"] == "VALOR_ATIPICO_LOTE"
+    assert dados["alertas"][0]["valor"] == "10000"
+
+
+def test_valor_atipico_e_alerta_e_nao_erro(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    _, resposta = preparar_lote_atipico(cliente, projeto_id, indicador_id)
+    dados = resposta.get_json()
+    assert dados["quantidade_erros"] == 0
+    assert dados["erros"] == []
+    assert dados["observacoes_a_criar"] == 8
+
+
+def test_confirmacao_com_alerta_sem_aceite_retorna_409(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    importacao_id, _ = preparar_lote_atipico(cliente, projeto_id, indicador_id)
+    resposta = cliente.post(f"/importacoes/{importacao_id}/confirmar")
+    assert resposta.status_code == 409
+    assert Observacao.query.count() == 0
+
+
+def test_aceite_explicito_preserva_valor_atipico(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    importacao_id, _ = preparar_lote_atipico(cliente, projeto_id, indicador_id)
+    resposta = cliente.post(
+        f"/importacoes/{importacao_id}/confirmar", json={"confirmar_alertas": True}
+    )
+    assert resposta.status_code == 200
+    extrema = Observacao.query.filter_by(importacao_id=importacao_id, periodo="2026-08").one()
+    assert float(extrema.valor) == 10000
+
+
+def test_lote_concluido_sem_uso_pode_ser_anulado(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    importacao_id = enviar(
+        cliente, projeto_id, "anular.csv", b"codigo;periodo;vendas\n001;01/2026;100\n"
+    )
+    cliente.post(f"/importacoes/{importacao_id}/validar", json=payload_largo(indicador_id))
+    cliente.post(f"/importacoes/{importacao_id}/confirmar")
+
+    resposta = cliente.post(f"/importacoes/{importacao_id}/anular")
+    assert resposta.status_code == 200
+    assert resposta.get_json()["status"] == "ANULADA"
+    assert resposta.get_json()["observacoes_removidas"] == 1
+    assert Observacao.query.filter_by(importacao_id=importacao_id).count() == 0
+    assert banco.session.get(Importacao, importacao_id) is not None
+
+
+def test_lote_usado_por_base_e_avaliacao_nao_pode_ser_anulado(ambiente):
+    _, cliente, projeto_id, grupo_id, entidade_id, indicador_id = ambiente
+    conteudo = (
+        b"codigo;periodo;vendas\n001;01/2026;10\n001;02/2026;20\n"
+        b"001;03/2026;30\n001;04/2026;25\n"
+    )
+    importacao_id = enviar(cliente, projeto_id, "dependencias.csv", conteudo)
+    cliente.post(f"/importacoes/{importacao_id}/validar", json=payload_largo(indicador_id))
+    assert cliente.post(f"/importacoes/{importacao_id}/confirmar").status_code == 200
+
+    base = cliente.post(
+        "/bases",
+        json={
+            "projeto_id": projeto_id,
+            "grupo_id": grupo_id,
+            "modo": "HISTORICO_ENTIDADE",
+            "entidade_referencia_id": entidade_id,
+            "nome": "Base usada pelo lote",
+            "versao": 1,
+            "periodo_inicial": "2026-01",
+            "periodo_final": "2026-03",
+            "cobertura_minima_percentual": 50,
+        },
+    )
+    assert base.status_code == 201, base.get_json()
+    base_id = base.get_json()["id"]
+    assert cliente.post(f"/bases/{base_id}/processar").status_code == 200
+    assert cliente.post(f"/bases/{base_id}/ativar").status_code == 200
+    avaliacao = cliente.post(
+        "/avaliacoes",
+        json={
+            "entidade_id": entidade_id,
+            "base_referencia_id": base_id,
+            "periodo": "2026-04",
+        },
+    )
+    assert avaliacao.status_code == 201, avaliacao.get_json()
+
+    resposta = cliente.post(f"/importacoes/{importacao_id}/anular")
+    assert resposta.status_code == 409
+    dados = resposta.get_json()
+    assert dados["quantidade_bases_dependentes"] == 1
+    assert dados["quantidade_avaliacoes_dependentes"] == 1
+    assert Observacao.query.filter_by(importacao_id=importacao_id).count() == 4
