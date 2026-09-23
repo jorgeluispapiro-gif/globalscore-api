@@ -50,6 +50,24 @@ namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global S
 namespace_importacoes = Namespace("importacoes", description="Importação assistida de CSV e XLSX")
 
 
+def nome_grupo_normalizado(nome):
+    """Normaliza somente espaços externos e caixa para comparar nomes de grupos."""
+
+    return str(nome or "").strip().casefold()
+
+
+def existe_grupo_com_nome(projeto_id, nome, grupo_ignorado_id=None):
+    """Verifica duplicidade dentro do projeto sem alterar registros antigos."""
+
+    grupos = GrupoComparavel.query.filter_by(projeto_id=projeto_id).all()
+    nome_procurado = nome_grupo_normalizado(nome)
+    return any(
+        grupo.id != grupo_ignorado_id
+        and nome_grupo_normalizado(grupo.nome) == nome_procurado
+        for grupo in grupos
+    )
+
+
 parser_upload = reqparse.RequestParser()
 parser_upload.add_argument("projeto_id", type=int, required=True, location="form")
 parser_upload.add_argument("arquivo", type=FileStorage, required=True, location="files")
@@ -363,10 +381,13 @@ class GruposResource(Resource):
         return [grupo_para_dict(grupo) for grupo in consulta.order_by(GrupoComparavel.id).all()]
 
     @namespace_grupos.expect(modelo_grupo, validate=True)
+    @namespace_grupos.response(409, "Já existe um grupo com esse nome neste projeto.")
     def post(self):
         dados = request.json
         if banco.session.get(Projeto, dados["projeto_id"]) is None:
             namespace_grupos.abort(404, "Projeto não encontrado.")
+        if existe_grupo_com_nome(dados["projeto_id"], dados["nome"]):
+            namespace_grupos.abort(409, "Já existe um grupo com esse nome neste projeto.")
         grupo = GrupoComparavel(
             projeto_id=dados["projeto_id"],
             nome=dados["nome"],
@@ -387,6 +408,7 @@ class GrupoResource(Resource):
         return grupo_para_dict(grupo)
 
     @namespace_grupos.expect(modelo_grupo, validate=False)
+    @namespace_grupos.response(409, "Já existe um grupo com esse nome neste projeto.")
     def patch(self, grupo_id):
         """Preserva o vínculo do grupo com o projeto e altera seus dados próprios."""
 
@@ -396,6 +418,8 @@ class GrupoResource(Resource):
         dados = request.json or {}
         if "projeto_id" in dados and dados["projeto_id"] != grupo.projeto_id:
             namespace_grupos.abort(400, "O projeto de um grupo existente não pode ser alterado.")
+        if "nome" in dados and existe_grupo_com_nome(grupo.projeto_id, dados["nome"], grupo.id):
+            namespace_grupos.abort(409, "Já existe um grupo com esse nome neste projeto.")
         for campo in {"nome", "descricao", "ativo"}:
             if campo in dados:
                 setattr(grupo, campo, dados[campo])

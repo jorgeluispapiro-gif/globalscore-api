@@ -89,6 +89,46 @@ def enviar(cliente, projeto_id, nome, conteudo):
     return resposta.get_json()["id"]
 
 
+def criar_grupo_pela_api(cliente, projeto_id, nome, ativo=True):
+    """Cria grupos nos testes pelo mesmo contrato REST usado pelo frontend."""
+
+    return cliente.post(
+        "/grupos",
+        json={"projeto_id": projeto_id, "nome": nome, "ativo": ativo},
+    )
+
+
+def test_grupo_criacao_normal_e_mesmo_nome_em_projetos_diferentes(ambiente):
+    _, cliente, projeto_id, *_ = ambiente
+    outro_projeto = cliente.post("/projetos", json={"nome": "Outro projeto"}).get_json()
+    assert criar_grupo_pela_api(cliente, projeto_id, "Unidades Operacionais").status_code == 201
+    assert criar_grupo_pela_api(cliente, outro_projeto["id"], "Unidades Operacionais").status_code == 201
+
+
+def test_grupo_post_rejeita_nome_equivalente_no_mesmo_projeto(ambiente):
+    _, cliente, projeto_id, *_ = ambiente
+    assert criar_grupo_pela_api(cliente, projeto_id, "Unidades Operacionais").status_code == 201
+    resposta = criar_grupo_pela_api(cliente, projeto_id, "  unidades operacionais  ")
+    assert resposta.status_code == 409
+    assert resposta.get_json()["message"] == "Já existe um grupo com esse nome neste projeto."
+
+
+def test_grupo_inativo_tambem_impede_duplicidade(ambiente):
+    _, cliente, projeto_id, *_ = ambiente
+    assert criar_grupo_pela_api(cliente, projeto_id, "Histórico", ativo=False).status_code == 201
+    assert criar_grupo_pela_api(cliente, projeto_id, "histórico").status_code == 409
+
+
+def test_grupo_patch_rejeita_nome_de_outro_grupo(ambiente):
+    _, cliente, projeto_id, *_ = ambiente
+    primeiro = criar_grupo_pela_api(cliente, projeto_id, "Grupo A").get_json()
+    segundo = criar_grupo_pela_api(cliente, projeto_id, "Grupo B").get_json()
+    resposta = cliente.patch(f"/grupos/{segundo['id']}", json={"nome": " grupo a "})
+    assert resposta.status_code == 409
+    assert resposta.get_json()["message"] == "Já existe um grupo com esse nome neste projeto."
+    assert cliente.get(f"/grupos/{primeiro['id']}").status_code == 200
+
+
 def preparar_lote_atipico(cliente, projeto_id, indicador_id):
     """Cria uma amostra simples cujo último valor ultrapassa 3 IQR."""
 
