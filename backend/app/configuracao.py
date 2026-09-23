@@ -17,6 +17,8 @@ class Configuracao:
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     JSON_SORT_KEYS = False
+    # Mantém respostas 404 genéricas, sem sugerir outras rotas existentes.
+    RESTX_ERROR_404_HELP = False
     MAX_CONTENT_LENGTH = 10 * 1024 * 1024
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_PUBLIC_KEY = os.getenv("SUPABASE_PUBLIC_KEY")

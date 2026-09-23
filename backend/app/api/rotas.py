@@ -54,6 +54,19 @@ namespace_importacoes = Namespace("importacoes", description="Importação assis
 STATUS_IMPORTACAO_RETOMAVEL = {"ANALISADA", "VALIDADA", "VALIDADA_COM_ALERTAS"}
 
 
+def obter_importacao_do_usuario(importacao_id):
+    """Obtém um lote somente quando ele pertence ao usuário autenticado.
+
+    A mesma resposta para lote inexistente ou pertencente a outra pessoa evita
+    revelar a existência de dados privados por meio da API.
+    """
+
+    importacao = banco.session.get(Importacao, importacao_id)
+    if importacao is None or importacao.criado_por != g.usuario_autenticado["id"]:
+        namespace_importacoes.abort(404, "Importação não encontrada.")
+    return importacao
+
+
 def nome_grupo_normalizado(nome):
     """Normaliza somente espaços externos e caixa para comparar nomes de grupos."""
 
@@ -720,19 +733,19 @@ class ImportacoesResource(Resource):
 @namespace_importacoes.route("/<int:importacao_id>")
 @namespace_importacoes.doc(security="Bearer")
 class ImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @autenticacao_obrigatoria
     def get(self, importacao_id):
         """Consulta somente metadados e resultados; o arquivo e seu caminho são privados."""
 
-        importacao = banco.session.get(Importacao, importacao_id)
-        if importacao is None:
-            namespace_importacoes.abort(404, "Importação não encontrada.")
+        importacao = obter_importacao_do_usuario(importacao_id)
         return importacao_para_dict(importacao)
 
 
 @namespace_importacoes.route("/<int:importacao_id>/inspecao")
 @namespace_importacoes.doc(security="Bearer")
 class InspecaoImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @namespace_importacoes.response(
         409, "O arquivo temporário desta importação não está mais disponível para retomada."
     )
@@ -740,9 +753,7 @@ class InspecaoImportacaoResource(Resource):
     def get(self, importacao_id):
         """Reinspeciona o arquivo privado sem devolver seu caminho físico."""
 
-        importacao = banco.session.get(Importacao, importacao_id)
-        if importacao is None or importacao.criado_por != g.usuario_autenticado["id"]:
-            namespace_importacoes.abort(404, "Importação não encontrada.")
+        importacao = obter_importacao_do_usuario(importacao_id)
         caminho = Path(importacao.caminho_arquivo_temporario or "")
         if importacao.status not in STATUS_IMPORTACAO_RETOMAVEL or not caminho.is_file():
             namespace_importacoes.abort(
@@ -761,13 +772,15 @@ class InspecaoImportacaoResource(Resource):
 @namespace_importacoes.route("/<int:importacao_id>/validar")
 @namespace_importacoes.doc(security="Bearer")
 class ValidarImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @namespace_importacoes.expect(modelo_validacao_importacao, validate=True)
     @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Executa o dry-run e não grava entidades, indicadores ou observações."""
 
+        importacao = obter_importacao_do_usuario(importacao_id)
         try:
-            return validar_importacao(importacao_id, request.json)
+            return validar_importacao(importacao.id, request.json)
         except ValueError as erro:
             banco.session.rollback()
             namespace_importacoes.abort(400, str(erro))
@@ -776,15 +789,17 @@ class ValidarImportacaoResource(Resource):
 @namespace_importacoes.route("/<int:importacao_id>/confirmar")
 @namespace_importacoes.doc(security="Bearer")
 class ConfirmarImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @namespace_importacoes.expect(modelo_confirmacao_importacao, validate=False)
     @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Confirma atomicamente; alertas exigem aceite explícito do gestor."""
 
+        importacao = obter_importacao_do_usuario(importacao_id)
         try:
             dados = request.get_json(silent=True) or {}
             importacao, quantidade = confirmar_importacao(
-                importacao_id, dados.get("confirmar_alertas") is True
+                importacao.id, dados.get("confirmar_alertas") is True
             )
             resposta = importacao_para_dict(importacao)
             resposta["observacoes_criadas"] = quantidade
@@ -800,13 +815,13 @@ class ConfirmarImportacaoResource(Resource):
 @namespace_importacoes.route("/<int:importacao_id>/observacoes")
 @namespace_importacoes.doc(security="Bearer")
 class ObservacoesImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @autenticacao_obrigatoria
     def get(self, importacao_id):
         """Lista os registros gravados por um lote para garantir rastreabilidade."""
 
-        if banco.session.get(Importacao, importacao_id) is None:
-            namespace_importacoes.abort(404, "Importação não encontrada.")
-        observacoes = Observacao.query.filter_by(importacao_id=importacao_id).order_by(
+        importacao = obter_importacao_do_usuario(importacao_id)
+        observacoes = Observacao.query.filter_by(importacao_id=importacao.id).order_by(
             Observacao.id
         )
         return [observacao_para_dict(item) for item in observacoes]
@@ -815,12 +830,14 @@ class ObservacoesImportacaoResource(Resource):
 @namespace_importacoes.route("/<int:importacao_id>/anular")
 @namespace_importacoes.doc(security="Bearer")
 class AnularImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
     @autenticacao_obrigatoria
     def post(self, importacao_id):
         """Cancela lote pendente ou anula lote concluído que ainda não foi consumido."""
 
+        importacao = obter_importacao_do_usuario(importacao_id)
         try:
-            importacao, quantidade = anular_importacao(importacao_id)
+            importacao, quantidade = anular_importacao(importacao.id)
             resposta = importacao_para_dict(importacao)
             resposta["observacoes_removidas"] = quantidade
             return resposta

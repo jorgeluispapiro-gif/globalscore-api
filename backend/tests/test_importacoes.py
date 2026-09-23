@@ -420,6 +420,7 @@ def test_token_valido_permite_acesso_a_rota_protegida(ambiente, monkeypatch):
     # O 404 demonstra que a autenticação passou e a rota procurou o lote solicitado.
     resposta = cliente.get("/importacoes/999", headers=cabecalho_autenticacao())
     assert resposta.status_code == 404
+    assert resposta.get_json()["message"] == "Importação não encontrada."
 
 
 def test_me_retorna_usuario_autenticado(ambiente, monkeypatch):
@@ -597,3 +598,88 @@ def test_usuario_diferente_nao_pode_reinspecionar_lote(ambiente, monkeypatch):
         headers=cabecalho_autenticacao("usuario-b"),
     )
     assert resposta.status_code == 404
+
+
+def test_rotas_do_lote_respeitam_proprietario_e_preservam_dados(
+    ambiente, monkeypatch
+):
+    """Um usuário não pode consultar nem alterar o lote criado por outro."""
+
+    aplicacao, cliente, projeto_id, _, _, indicador_id = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+    monkeypatch.setattr(
+        servico_autenticacao,
+        "validar_token_supabase",
+        lambda token: {"id": token, "email": f"{token}@email.com"},
+    )
+    cabecalho_usuario_a = cabecalho_autenticacao("usuario-a")
+    cabecalho_usuario_b = cabecalho_autenticacao("usuario-b")
+    resposta_upload = cliente.post(
+        "/importacoes",
+        headers=cabecalho_usuario_a,
+        data={
+            "projeto_id": str(projeto_id),
+            "arquivo": (
+                io.BytesIO(b"codigo;periodo;vendas\n001;01/2026;100\n"),
+                "dados-privados.csv",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+    assert resposta_upload.status_code == 201
+    importacao_id = resposta_upload.get_json()["id"]
+
+    chamadas_usuario_b = [
+        cliente.get(f"/importacoes/{importacao_id}", headers=cabecalho_usuario_b),
+        cliente.get(
+            f"/importacoes/{importacao_id}/inspecao", headers=cabecalho_usuario_b
+        ),
+        cliente.post(
+            f"/importacoes/{importacao_id}/validar",
+            headers=cabecalho_usuario_b,
+            json=payload_largo(indicador_id),
+        ),
+        cliente.post(
+            f"/importacoes/{importacao_id}/confirmar", headers=cabecalho_usuario_b
+        ),
+        cliente.get(
+            f"/importacoes/{importacao_id}/observacoes", headers=cabecalho_usuario_b
+        ),
+        cliente.post(
+            f"/importacoes/{importacao_id}/anular", headers=cabecalho_usuario_b
+        ),
+    ]
+    assert all(resposta.status_code == 404 for resposta in chamadas_usuario_b)
+    mensagens = [resposta.get_json()["message"] for resposta in chamadas_usuario_b]
+    assert mensagens == ["Importação não encontrada."] * 6
+
+    # As tentativas alheias não mudam o lote nem criam observações.
+    importacao = banco.session.get(Importacao, importacao_id)
+    assert importacao.status == "ANALISADA"
+    assert Observacao.query.filter_by(importacao_id=importacao_id).count() == 0
+
+    # O proprietário continua usando todas as operações quando o estado permite.
+    assert cliente.get(
+        f"/importacoes/{importacao_id}", headers=cabecalho_usuario_a
+    ).status_code == 200
+    assert cliente.get(
+        f"/importacoes/{importacao_id}/inspecao", headers=cabecalho_usuario_a
+    ).status_code == 200
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/validar",
+        headers=cabecalho_usuario_a,
+        json=payload_largo(indicador_id),
+    ).status_code == 200
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/confirmar", headers=cabecalho_usuario_a
+    ).status_code == 200
+    observacoes = cliente.get(
+        f"/importacoes/{importacao_id}/observacoes", headers=cabecalho_usuario_a
+    )
+    assert observacoes.status_code == 200
+    assert len(observacoes.get_json()) == 1
+    anulacao = cliente.post(
+        f"/importacoes/{importacao_id}/anular", headers=cabecalho_usuario_a
+    )
+    assert anulacao.status_code == 200
+    assert anulacao.get_json()["status"] == "ANULADA"
