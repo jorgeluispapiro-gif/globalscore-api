@@ -1,6 +1,8 @@
 """Cinco testes essenciais do fluxo de importação assistida."""
 
 import io
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
@@ -467,3 +469,131 @@ def test_importacao_usa_id_autenticado_como_criado_por(ambiente, monkeypatch):
     assert resposta.status_code == 201, resposta.get_json()
     importacao = banco.session.get(Importacao, resposta.get_json()["id"])
     assert importacao.criado_por == "usuario-supabase-123"
+
+
+def test_lista_importacoes_retomaveis_filtra_status_projeto_usuario_e_ordena(
+    ambiente, monkeypatch
+):
+    aplicacao, cliente, projeto_id, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    primeiro = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={
+            "projeto_id": str(projeto_id),
+            "arquivo": (io.BytesIO(b"codigo;periodo\n001;01/2026\n"), "primeiro.csv"),
+        },
+        content_type="multipart/form-data",
+    ).get_json()
+    segundo = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={
+            "projeto_id": str(projeto_id),
+            "arquivo": (io.BytesIO(b"codigo;periodo\n001;02/2026\n"), "segundo.csv"),
+        },
+        content_type="multipart/form-data",
+    ).get_json()
+    lote_primeiro = banco.session.get(Importacao, primeiro["id"])
+    lote_segundo = banco.session.get(Importacao, segundo["id"])
+    lote_primeiro.status = "VALIDADA"
+    lote_primeiro.criado_em = lote_segundo.criado_em - timedelta(minutes=1)
+    projeto_outro = Projeto(nome="Outro projeto")
+    banco.session.add(projeto_outro)
+    banco.session.flush()
+    banco.session.add_all(
+        [
+            Importacao(projeto_id=projeto_id, nome_arquivo_original="concluida.csv", tipo_arquivo="CSV", hash_sha256="a" * 64, status="CONCLUIDA", criado_por="usuario-supabase-123"),
+            Importacao(projeto_id=projeto_id, nome_arquivo_original="anulada.csv", tipo_arquivo="CSV", hash_sha256="b" * 64, status="ANULADA", criado_por="usuario-supabase-123"),
+            Importacao(projeto_id=projeto_id, nome_arquivo_original="cancelada.csv", tipo_arquivo="CSV", hash_sha256="c" * 64, status="CANCELADA", criado_por="usuario-supabase-123"),
+            Importacao(projeto_id=projeto_id, nome_arquivo_original="falha.csv", tipo_arquivo="CSV", hash_sha256="d" * 64, status="FALHA", criado_por="usuario-supabase-123"),
+            Importacao(projeto_id=projeto_id, nome_arquivo_original="outro-usuario.csv", tipo_arquivo="CSV", hash_sha256="e" * 64, status="ANALISADA", criado_por="outro-usuario"),
+            Importacao(projeto_id=projeto_outro.id, nome_arquivo_original="outro-projeto.csv", tipo_arquivo="CSV", hash_sha256="f" * 64, status="ANALISADA", criado_por="usuario-supabase-123"),
+        ]
+    )
+    banco.session.commit()
+
+    resposta = cliente.get(
+        f"/importacoes?projeto_id={projeto_id}&pendentes=true",
+        headers=cabecalho_autenticacao(),
+    )
+    assert resposta.status_code == 200
+    dados = resposta.get_json()
+    assert [item["id"] for item in dados] == [segundo["id"], primeiro["id"]]
+    assert all("caminho_arquivo_temporario" not in item for item in dados)
+
+
+def test_lista_importacoes_exige_projeto(ambiente, monkeypatch):
+    aplicacao, cliente, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    resposta = cliente.get("/importacoes", headers=cabecalho_autenticacao())
+    assert resposta.status_code == 400
+
+
+def test_inspecao_retomada_csv_e_xlsx_reutiliza_leitor(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    csv_id = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={"projeto_id": str(projeto_id), "arquivo": (io.BytesIO(b"codigo;periodo\n001;01/2026\n"), "dados.csv")},
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+    livro = Workbook()
+    livro.active.append(["codigo", "periodo"])
+    livro.active.append(["001", "01/2026"])
+    arquivo_xlsx = io.BytesIO()
+    livro.save(arquivo_xlsx)
+    arquivo_xlsx.seek(0)
+    xlsx_id = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={"projeto_id": str(projeto_id), "arquivo": (arquivo_xlsx, "dados.xlsx")},
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+
+    resposta_csv = cliente.get(f"/importacoes/{csv_id}/inspecao", headers=cabecalho_autenticacao())
+    resposta_xlsx = cliente.get(f"/importacoes/{xlsx_id}/inspecao", headers=cabecalho_autenticacao())
+    assert resposta_csv.status_code == 200
+    assert resposta_csv.get_json()["preview"][0] == ["codigo", "periodo"]
+    assert resposta_xlsx.status_code == 200
+    assert resposta_xlsx.get_json()["abas"][0]["preview"][0] == ["codigo", "periodo"]
+    assert "caminho_arquivo_temporario" not in resposta_csv.get_json()
+
+
+def test_inspecao_sem_arquivo_retorna_409_tratado(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    importacao_id = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao(),
+        data={"projeto_id": str(projeto_id), "arquivo": (io.BytesIO(b"codigo\n001\n"), "dados.csv")},
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+    importacao = banco.session.get(Importacao, importacao_id)
+    Path(importacao.caminho_arquivo_temporario).unlink()
+
+    resposta = cliente.get(f"/importacoes/{importacao_id}/inspecao", headers=cabecalho_autenticacao())
+    assert resposta.status_code == 409
+    assert resposta.get_json()["message"] == "O arquivo temporário desta importação não está mais disponível para retomada."
+
+
+def test_usuario_diferente_nao_pode_reinspecionar_lote(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, *_ = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+    monkeypatch.setattr(
+        servico_autenticacao,
+        "validar_token_supabase",
+        lambda token: {"id": token, "email": f"{token}@email.com"},
+    )
+    importacao_id = cliente.post(
+        "/importacoes",
+        headers=cabecalho_autenticacao("usuario-a"),
+        data={"projeto_id": str(projeto_id), "arquivo": (io.BytesIO(b"codigo\n001\n"), "dados.csv")},
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+    resposta = cliente.get(
+        f"/importacoes/{importacao_id}/inspecao",
+        headers=cabecalho_autenticacao("usuario-b"),
+    )
+    assert resposta.status_code == 404

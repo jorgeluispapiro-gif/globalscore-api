@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 from flask import g, request
 from flask_restx import Namespace, Resource, fields, reqparse
@@ -30,6 +31,7 @@ from app.servicos.importacoes import (
     anular_importacao,
     confirmar_importacao,
     importacao_para_dict,
+    inspecionar_arquivo,
     receber_arquivo,
     validar_importacao,
 )
@@ -48,6 +50,8 @@ namespace_observacoes = Namespace("observacoes", description="Consulta e entrada
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
 namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global Score")
 namespace_importacoes = Namespace("importacoes", description="Importação assistida de CSV e XLSX")
+
+STATUS_IMPORTACAO_RETOMAVEL = {"ANALISADA", "VALIDADA", "VALIDADA_COM_ALERTAS"}
 
 
 def nome_grupo_normalizado(nome):
@@ -667,6 +671,34 @@ class UsuarioAutenticadoResource(Resource):
 @namespace_importacoes.route("")
 @namespace_importacoes.doc(security="Bearer")
 class ImportacoesResource(Resource):
+    @namespace_importacoes.doc(
+        params={
+            "projeto_id": "Identificador obrigatório do projeto.",
+            "pendentes": "Deve ser true para consultar lotes retomáveis.",
+        },
+        responses={400: "Filtro inválido ou ausente."},
+    )
+    @autenticacao_obrigatoria
+    def get(self):
+        """Lista somente os lotes retomáveis do projeto e do usuário autenticado."""
+
+        projeto_id = request.args.get("projeto_id", type=int)
+        pendentes = request.args.get("pendentes", default="true", type=str).lower()
+        if projeto_id is None:
+            namespace_importacoes.abort(400, "Informe o projeto_id para consultar importações pendentes.")
+        if pendentes not in {"true", "1"}:
+            namespace_importacoes.abort(400, "Esta consulta aceita somente pendentes=true.")
+        importacoes = (
+            Importacao.query.filter(
+                Importacao.projeto_id == projeto_id,
+                Importacao.criado_por == g.usuario_autenticado["id"],
+                Importacao.status.in_(STATUS_IMPORTACAO_RETOMAVEL),
+            )
+            .order_by(Importacao.criado_em.desc(), Importacao.id.desc())
+            .all()
+        )
+        return [importacao_para_dict(item) for item in importacoes]
+
     @namespace_importacoes.expect(parser_upload)
     @autenticacao_obrigatoria
     def post(self):
@@ -696,6 +728,34 @@ class ImportacaoResource(Resource):
         if importacao is None:
             namespace_importacoes.abort(404, "Importação não encontrada.")
         return importacao_para_dict(importacao)
+
+
+@namespace_importacoes.route("/<int:importacao_id>/inspecao")
+@namespace_importacoes.doc(security="Bearer")
+class InspecaoImportacaoResource(Resource):
+    @namespace_importacoes.response(
+        409, "O arquivo temporário desta importação não está mais disponível para retomada."
+    )
+    @autenticacao_obrigatoria
+    def get(self, importacao_id):
+        """Reinspeciona o arquivo privado sem devolver seu caminho físico."""
+
+        importacao = banco.session.get(Importacao, importacao_id)
+        if importacao is None or importacao.criado_por != g.usuario_autenticado["id"]:
+            namespace_importacoes.abort(404, "Importação não encontrada.")
+        caminho = Path(importacao.caminho_arquivo_temporario or "")
+        if importacao.status not in STATUS_IMPORTACAO_RETOMAVEL or not caminho.is_file():
+            namespace_importacoes.abort(
+                409,
+                "O arquivo temporário desta importação não está mais disponível para retomada.",
+            )
+        try:
+            return inspecionar_arquivo(importacao)
+        except (OSError, UnicodeDecodeError, ValueError):
+            namespace_importacoes.abort(
+                409,
+                "O arquivo temporário desta importação não está mais disponível para retomada.",
+            )
 
 
 @namespace_importacoes.route("/<int:importacao_id>/validar")
