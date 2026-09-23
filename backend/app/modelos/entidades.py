@@ -126,6 +126,8 @@ class Importacao(banco.Model):
     status = banco.Column(banco.String(20), nullable=False, default="ENVIADA")
     aba_selecionada = banco.Column(banco.String(255))
     configuracao_leitura_json = banco.Column(banco.Text)
+    # Fotografia estrutural sem valores das linhas; continua disponível após apagar o arquivo.
+    estrutura_json = banco.Column(banco.Text)
     mapeamento_json = banco.Column(banco.Text)
     quantidade_linhas_lidas = banco.Column(banco.Integer, nullable=False, default=0)
     quantidade_linhas_validas = banco.Column(banco.Integer, nullable=False, default=0)
@@ -143,6 +145,38 @@ class Importacao(banco.Model):
 
     projeto = banco.relationship("Projeto", backref="importacoes")
     observacoes = banco.relationship("Observacao", backref="importacao", lazy=True)
+
+
+class PerfilImportacao(banco.Model):
+    """Configuração reutilizável derivada de uma importação concluída."""
+
+    __tablename__ = "perfis_importacao"
+    __table_args__ = (
+        UniqueConstraint("importacao_origem_id", name="uq_perfil_importacao_origem"),
+    )
+
+    id = banco.Column(banco.Integer, primary_key=True)
+    projeto_id = banco.Column(banco.ForeignKey("projetos.id"), nullable=False, index=True)
+    nome = banco.Column(banco.String(120), nullable=False)
+    versao = banco.Column(banco.Integer, nullable=False, default=1)
+    importacao_origem_id = banco.Column(
+        banco.ForeignKey("importacoes.id"), nullable=False, index=True
+    )
+    tipo_arquivo = banco.Column(banco.String(10), nullable=False)
+    configuracao_leitura_json = banco.Column(banco.Text, nullable=False)
+    estrutura_json = banco.Column(banco.Text, nullable=False)
+    mapeamento_json = banco.Column(banco.Text, nullable=False)
+    assinatura_estrutura = banco.Column(banco.String(64), nullable=False, index=True)
+    versao_assinatura = banco.Column(banco.Integer, nullable=False, default=1)
+    ativo = banco.Column(banco.Boolean, nullable=False, default=True)
+    criado_por = banco.Column(banco.String(120), nullable=False)
+    criado_em = banco.Column(banco.DateTime(timezone=True), nullable=False, default=agora_utc)
+    atualizado_em = banco.Column(
+        banco.DateTime(timezone=True), nullable=False, default=agora_utc, onupdate=agora_utc
+    )
+
+    projeto = banco.relationship("Projeto", backref="perfis_importacao")
+    importacao_origem = banco.relationship("Importacao", backref="perfil_importacao")
 
 
 class BaseReferencia(banco.Model):

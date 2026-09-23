@@ -157,8 +157,15 @@ uma tabela filha sem mudar o contrato externo.
 
 ### 5.2 Campos adicionais em `Importacao`
 
+Na 4B2-A, `Importacao.estrutura_json` passa a guardar a fotografia dos
+cabeçalhos, seus índices, nomes normalizados, tipo de arquivo e configuração
+estrutural relevante. Essa fotografia é produzida durante a validação, antes
+que o arquivo temporário seja removido na conclusão do lote, e não contém
+valores das linhas.
+
 ```text
 Importacao
+- estrutura_json                       fotografia estrutural, opcional para lotes antigos
 - perfil_importacao_id                 FK da versão aplicada, opcional
 - classificacao_compatibilidade        COMPATIVEL |
                                        COMPATIVEL_COM_DIFERENCAS |

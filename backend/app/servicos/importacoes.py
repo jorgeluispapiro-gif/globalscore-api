@@ -30,6 +30,7 @@ from app.modelos import (
 )
 from app.modelos.entidades import agora_utc
 from app.servicos.motor_percentil import calcular_percentil_inc
+from app.servicos.perfis_importacao import montar_fotografia_estrutura
 
 
 FORMATOS_ACEITOS = {".csv": "CSV", ".xlsx": "XLSX"}
@@ -643,6 +644,14 @@ def validar_importacao(importacao_id, payload):
     resumo = _executar_validacao(importacao, payload)
     importacao.aba_selecionada = payload.get("configuracao_leitura", {}).get("aba")
     importacao.configuracao_leitura_json = json.dumps(payload.get("configuracao_leitura", {}), ensure_ascii=False)
+    importacao.estrutura_json = json.dumps(
+        montar_fotografia_estrutura(
+            importacao,
+            resumo["cabecalhos"],
+            payload.get("configuracao_leitura", {}),
+        ),
+        ensure_ascii=False,
+    )
     importacao.mapeamento_json = json.dumps(payload.get("mapeamento", {}), ensure_ascii=False)
     importacao.quantidade_linhas_lidas = resumo["linhas_lidas"]
     importacao.quantidade_linhas_validas = resumo["linhas_validas"]

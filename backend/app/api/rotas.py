@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from app.modelos import (
     IndicadorBaseReferencia,
     Importacao,
     Observacao,
+    PerfilImportacao,
     Projeto,
 )
 from app.servicos.avaliacoes import calcular_avaliacao
@@ -35,6 +37,7 @@ from app.servicos.importacoes import (
     receber_arquivo,
     validar_importacao,
 )
+from app.servicos.perfis_importacao import criar_perfil_importacao, perfil_para_dict
 from werkzeug.datastructures import FileStorage
 
 
@@ -50,6 +53,9 @@ namespace_observacoes = Namespace("observacoes", description="Consulta e entrada
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
 namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global Score")
 namespace_importacoes = Namespace("importacoes", description="Importação assistida de CSV e XLSX")
+namespace_perfis_importacao = Namespace(
+    "perfis-importacao", description="Perfis reutilizáveis de importação"
+)
 
 STATUS_IMPORTACAO_RETOMAVEL = {"ANALISADA", "VALIDADA", "VALIDADA_COM_ALERTAS"}
 
@@ -104,6 +110,14 @@ modelo_confirmacao_importacao = namespace_importacoes.model(
             default=False,
             description="Aceite explícito dos alertas de qualidade apresentados no dry-run.",
         )
+    },
+)
+
+modelo_perfil_importacao = namespace_perfis_importacao.model(
+    "PerfilImportacaoEntrada",
+    {
+        "importacao_id": fields.Integer(required=True),
+        "nome": fields.String(required=True),
     },
 )
 
@@ -854,6 +868,52 @@ class AnularImportacaoResource(Resource):
         except ValueError as erro:
             banco.session.rollback()
             namespace_importacoes.abort(400, str(erro))
+
+
+@namespace_perfis_importacao.route("")
+@namespace_perfis_importacao.doc(security="Bearer")
+class PerfisImportacaoResource(Resource):
+    @autenticacao_obrigatoria
+    def get(self):
+        """Lista somente os perfis do usuário autenticado no projeto informado."""
+
+        projeto_id = request.args.get("projeto_id", type=int)
+        if projeto_id is None:
+            namespace_perfis_importacao.abort(
+                400, "Informe projeto_id para listar os perfis."
+            )
+        perfis = PerfilImportacao.query.filter_by(
+            projeto_id=projeto_id,
+            criado_por=g.usuario_autenticado["id"],
+        ).order_by(PerfilImportacao.id).all()
+        return [perfil_para_dict(perfil) for perfil in perfis]
+
+    @namespace_perfis_importacao.expect(modelo_perfil_importacao, validate=True)
+    @namespace_perfis_importacao.response(201, "Perfil criado.")
+    @namespace_perfis_importacao.response(404, "Importação não encontrada.")
+    @autenticacao_obrigatoria
+    def post(self):
+        """Cria a versão 1 a partir de uma importação concluída do usuário."""
+
+        dados = request.json
+        importacao = banco.session.get(Importacao, dados["importacao_id"])
+        if importacao is None or importacao.criado_por != g.usuario_autenticado["id"]:
+            namespace_perfis_importacao.abort(404, "Importação não encontrada.")
+        try:
+            perfil = criar_perfil_importacao(
+                importacao,
+                dados["nome"],
+                g.usuario_autenticado["id"],
+            )
+            return perfil_para_dict(perfil), 201
+        except IntegrityError:
+            banco.session.rollback()
+            namespace_perfis_importacao.abort(
+                409, "Esta importação já originou um perfil."
+            )
+        except (ValueError, json.JSONDecodeError) as erro:
+            banco.session.rollback()
+            namespace_perfis_importacao.abort(400, str(erro))
 
 
 @namespace_bases.route("")

@@ -23,6 +23,8 @@ def _aplicar_ajustes_aditivos_de_schema():
         )
     if "resumo_alertas_json" not in colunas:
         comandos.append("ALTER TABLE importacoes ADD COLUMN resumo_alertas_json TEXT")
+    if "estrutura_json" not in colunas:
+        comandos.append("ALTER TABLE importacoes ADD COLUMN estrutura_json TEXT")
     if comandos:
         with banco.engine.begin() as conexao:
             for comando in comandos:

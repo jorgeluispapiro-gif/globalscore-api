@@ -1,6 +1,7 @@
 """Cinco testes essenciais do fluxo de importação assistida."""
 
 import io
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from openpyxl import Workbook
 from app import criar_aplicacao
 from app.configuracao import ConfiguracaoTeste
 from app.extensoes import banco
-from app.modelos import Entidade, GrupoComparavel, Importacao, Indicador, Observacao, Projeto
+from app.modelos import (
+    Entidade,
+    GrupoComparavel,
+    Importacao,
+    Indicador,
+    Observacao,
+    PerfilImportacao,
+    Projeto,
+)
 from app.servicos import importacoes as servico_importacoes
 from app.servicos import autenticacao as servico_autenticacao
 
@@ -683,3 +692,117 @@ def test_rotas_do_lote_respeitam_proprietario_e_preservam_dados(
     )
     assert anulacao.status_code == 200
     assert anulacao.get_json()["status"] == "ANULADA"
+
+
+def test_validacao_preserva_fotografia_estrutural_dos_cabecalhos(ambiente):
+    """A estrutura sobrevive ao arquivo e não inclui valores das linhas."""
+
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "estrutura.csv",
+        "codigo;periodo;  Produtividade   MÉDIA  \n001;01/2026;10\n".encode(),
+    )
+    resposta = cliente.post(
+        f"/importacoes/{importacao_id}/validar", json=payload_largo(indicador_id)
+    )
+    assert resposta.status_code == 200
+
+    importacao = banco.session.get(Importacao, importacao_id)
+    estrutura = json.loads(importacao.estrutura_json)
+    assert estrutura["tipo_arquivo"] == "CSV"
+    assert estrutura["cabecalhos"][2] == {
+        "indice_coluna": 3,
+        "nome_original": "Produtividade   MÉDIA",
+        "nome_normalizado": "produtividade média",
+    }
+    assert "10" not in importacao.estrutura_json
+
+
+def test_perfil_converte_indicador_criado_em_existente(ambiente):
+    """O perfil aponta para o cadastro criado na confirmação, sem repetir CRIAR."""
+
+    _, cliente, projeto_id, *_ = ambiente
+    importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "novo-indicador.csv",
+        b"codigo;periodo;qualidade\n001;01/2026;95\n",
+    )
+    payload = payload_largo(0)
+    payload["mapeamento"]["colunas"][2]["indicador"] = {
+        "acao": "CRIAR",
+        "dados": {
+            "codigo": "QUALIDADE",
+            "nome": "Qualidade",
+            "unidade_medida": "%",
+            "direcao": "MAIOR_MELHOR",
+            "peso_percentual": 0,
+            "obrigatorio": False,
+            "participa_global_score": False,
+        },
+    }
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/validar", json=payload
+    ).status_code == 200
+    assert cliente.post(f"/importacoes/{importacao_id}/confirmar").status_code == 200
+
+    resposta = cliente.post(
+        "/perfis-importacao",
+        json={"importacao_id": importacao_id, "nome": "Perfil mensal"},
+    )
+    assert resposta.status_code == 201, resposta.get_json()
+    perfil = PerfilImportacao.query.one()
+    indicador = Indicador.query.filter_by(projeto_id=projeto_id, codigo="QUALIDADE").one()
+    mapeamento = json.loads(perfil.mapeamento_json)
+    assert mapeamento["colunas"][2]["indicador"] == {
+        "acao": "EXISTENTE",
+        "indicador_id": indicador.id,
+    }
+    assert len(perfil.assinatura_estrutura) == 64
+    lista = cliente.get(f"/perfis-importacao?projeto_id={projeto_id}")
+    assert lista.status_code == 200
+    assert [item["id"] for item in lista.get_json()] == [perfil.id]
+
+
+def test_outro_usuario_nao_cria_perfil_de_lote_alheio(ambiente, monkeypatch):
+    """A inexistência aparente do lote protege sua propriedade entre usuários."""
+
+    aplicacao, cliente, projeto_id, _, _, indicador_id = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+    monkeypatch.setattr(
+        servico_autenticacao,
+        "validar_token_supabase",
+        lambda token: {"id": token, "email": f"{token}@email.com"},
+    )
+    usuario_a = cabecalho_autenticacao("usuario-a")
+    importacao_id = cliente.post(
+        "/importacoes",
+        headers=usuario_a,
+        data={
+            "projeto_id": str(projeto_id),
+            "arquivo": (
+                io.BytesIO(b"codigo;periodo;vendas\n001;01/2026;100\n"),
+                "privado.csv",
+            ),
+        },
+        content_type="multipart/form-data",
+    ).get_json()["id"]
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/validar",
+        headers=usuario_a,
+        json=payload_largo(indicador_id),
+    ).status_code == 200
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/confirmar", headers=usuario_a
+    ).status_code == 200
+
+    resposta = cliente.post(
+        "/perfis-importacao",
+        headers=cabecalho_autenticacao("usuario-b"),
+        json={"importacao_id": importacao_id, "nome": "Perfil indevido"},
+    )
+    assert resposta.status_code == 404
+    assert resposta.get_json()["message"] == "Importação não encontrada."
+    assert PerfilImportacao.query.count() == 0

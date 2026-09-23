@@ -29,6 +29,7 @@ def registrar_namespaces():
         namespace_indicadores,
         namespace_importacoes,
         namespace_observacoes,
+        namespace_perfis_importacao,
         namespace_projetos,
         namespace_sistema,
     )
@@ -41,5 +42,6 @@ def registrar_namespaces():
     api.add_namespace(namespace_indicadores)
     api.add_namespace(namespace_observacoes)
     api.add_namespace(namespace_importacoes)
+    api.add_namespace(namespace_perfis_importacao)
     api.add_namespace(namespace_bases)
     api.add_namespace(namespace_avaliacoes)
