@@ -1168,3 +1168,27 @@ def test_base_nao_ativa_bloqueia_lote_antes_do_processamento(
     assert resposta.status_code == 400
     assert "ativa" in resposta.get_json()["message"]
     assert Avaliacao.query.count() == 0
+
+
+def test_listagem_de_bases_informa_grupo_id(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, grupo_id, *_ = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    base = BaseReferencia(
+        projeto_id=projeto_id,
+        grupo_id=grupo_id,
+        modo="ENTRE_ENTIDADES",
+        nome="Referência do grupo",
+        versao=1,
+        periodo_inicial="2024-01",
+        periodo_final="2024-03",
+        criada_por="usuario-supabase-123",
+    )
+    banco.session.add(base)
+    banco.session.commit()
+
+    resposta = cliente.get(
+        f"/bases?projeto_id={projeto_id}", headers=cabecalho_autenticacao()
+    )
+
+    assert resposta.status_code == 200
+    assert resposta.get_json()[0]["grupo_id"] == grupo_id

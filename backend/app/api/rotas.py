@@ -316,6 +316,7 @@ def base_para_dict(base):
     indicadores = IndicadorBaseReferencia.query.filter_by(base_referencia_id=base.id).all()
     return {
         "id": base.id,
+        "grupo_id": base.grupo_id,
         "nome": base.nome,
         "versao": base.versao,
         "modo": base.modo,
