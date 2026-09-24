@@ -518,6 +518,9 @@ def reconhecer_perfil_importacao(importacao, criado_por):
         "resultado": "COMPATIVEL_COM_DIFERENCAS",
         "perfil_sugerido": _resumo_perfil_sugerido(melhor["perfil"]),
         "diferencas": melhor["diferencas"],
+        "configuracao_leitura_sugerida": json.loads(
+            melhor["perfil"].configuracao_leitura_json or "{}"
+        ),
         "mapeamento_sugerido": melhor["mapeamento_sugerido"],
     }
 

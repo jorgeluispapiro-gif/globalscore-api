@@ -905,6 +905,9 @@ def test_colunas_reordenadas_e_extra_retornam_diferencas_estruturadas(ambiente):
     dados = resposta.get_json()
     assert dados["resultado"] == "COMPATIVEL_COM_DIFERENCAS"
     assert dados["perfil_sugerido"]["id"] == perfil_id
+    assert dados["configuracao_leitura_sugerida"] == payload_largo(indicador_id)[
+        "configuracao_leitura"
+    ]
     diferencas_por_tipo = {item["tipo"]: item for item in dados["diferencas"]}
     assert diferencas_por_tipo["COLUNA_NOVA"] == {
         "tipo": "COLUNA_NOVA",
