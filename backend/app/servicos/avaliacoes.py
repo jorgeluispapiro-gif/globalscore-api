@@ -1,3 +1,5 @@
+import re
+from datetime import datetime
 from decimal import Decimal
 
 from app.extensoes import banco
@@ -11,6 +13,130 @@ from app.modelos import (
     ReguaPercentil,
 )
 from app.servicos.motor_percentil import calcular_global_score, pontuar_valor
+
+
+def gerar_periodos_mensais(periodo_inicial, periodo_final):
+    """Valida e expande um intervalo mensal inclusivo no formato AAAA-MM."""
+
+    formato_mensal = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+    if not all(
+        isinstance(periodo, str) and formato_mensal.fullmatch(periodo)
+        for periodo in (periodo_inicial, periodo_final)
+    ):
+        raise ValueError("Períodos devem seguir o formato AAAA-MM.")
+    try:
+        inicio = datetime.strptime(periodo_inicial, "%Y-%m")
+        fim = datetime.strptime(periodo_final, "%Y-%m")
+    except ValueError as erro:
+        raise ValueError("Períodos devem seguir o formato AAAA-MM.") from erro
+    if fim < inicio:
+        raise ValueError("O período final não pode ser anterior ao período inicial.")
+
+    periodos = []
+    ano, mes = inicio.year, inicio.month
+    while (ano, mes) <= (fim.year, fim.month):
+        periodos.append(f"{ano:04d}-{mes:02d}")
+        if mes == 12:
+            ano, mes = ano + 1, 1
+        else:
+            mes += 1
+    return periodos
+
+
+def processar_avaliacoes_em_lote(base_id, periodo_inicial, periodo_final):
+    """Calcula a matriz entidade x período sem duplicar a matemática individual.
+
+    As validações estruturais ocorrem antes do primeiro cálculo. Cada combinação
+    usa ``calcular_avaliacao``, que mantém as mesmas regras de percentis, pesos e
+    dados ausentes da avaliação individual.
+    """
+
+    base = banco.session.get(BaseReferencia, base_id)
+    if base is None:
+        raise ValueError("Base de Referência não encontrada.")
+    if base.status != "ATIVA":
+        raise ValueError("O processamento em lote exige uma Base de Referência ativa.")
+    periodos = gerar_periodos_mensais(periodo_inicial, periodo_final)
+
+    if base.modo == "HISTORICO_ENTIDADE":
+        entidade = banco.session.get(Entidade, base.entidade_referencia_id)
+        entidades = [entidade] if entidade is not None else []
+    else:
+        entidades = (
+            Entidade.query.filter_by(grupo_id=base.grupo_id, ativa=True)
+            .order_by(Entidade.id)
+            .all()
+        )
+
+    resultados = []
+    contadores = {
+        "quantidade_processadas": 0,
+        "quantidade_incompletas": 0,
+        "quantidade_ja_existentes": 0,
+        "quantidade_erros": 0,
+    }
+
+    for entidade in entidades:
+        for periodo in periodos:
+            existente = Avaliacao.query.filter_by(
+                entidade_id=entidade.id,
+                periodo=periodo,
+                base_referencia_id=base.id,
+            ).first()
+            if existente is not None:
+                contadores["quantidade_ja_existentes"] += 1
+                resultados.append(
+                    {
+                        "entidade_id": entidade.id,
+                        "periodo": periodo,
+                        "status": "JA_EXISTENTE",
+                        "avaliacao_id": existente.id,
+                    }
+                )
+                continue
+
+            try:
+                avaliacao = calcular_avaliacao(entidade.id, base.id, periodo)
+            except ValueError as erro:
+                # O cálculo individual pode ter iniciado uma transação; somente a
+                # combinação atual é desfeita, sem afetar commits anteriores.
+                banco.session.rollback()
+                contadores["quantidade_erros"] += 1
+                resultados.append(
+                    {
+                        "entidade_id": entidade.id,
+                        "periodo": periodo,
+                        "status": "ERRO",
+                        "erro": str(erro),
+                    }
+                )
+                continue
+
+            if avaliacao.status == "INCOMPLETA":
+                contadores["quantidade_incompletas"] += 1
+            else:
+                contadores["quantidade_processadas"] += 1
+            resultados.append(
+                {
+                    "entidade_id": entidade.id,
+                    "periodo": periodo,
+                    "status": avaliacao.status,
+                    "avaliacao_id": avaliacao.id,
+                    "global_score": (
+                        float(avaliacao.global_score)
+                        if avaliacao.global_score is not None
+                        else None
+                    ),
+                }
+            )
+
+    return {
+        "base_referencia_id": base.id,
+        "periodo_inicial": periodo_inicial,
+        "periodo_final": periodo_final,
+        **contadores,
+        "resultados": resultados,
+    }
 
 
 def calcular_avaliacao(entidade_id, base_id, periodo):

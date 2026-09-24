@@ -19,7 +19,7 @@ from app.modelos import (
     PerfilImportacao,
     Projeto,
 )
-from app.servicos.avaliacoes import calcular_avaliacao
+from app.servicos.avaliacoes import calcular_avaliacao, processar_avaliacoes_em_lote
 from app.servicos.autenticacao import autenticacao_obrigatoria
 from app.servicos.bases_referencia import (
     ajustar_pesos_base,
@@ -223,6 +223,15 @@ modelo_avaliacao = namespace_avaliacoes.model(
         "entidade_id": fields.Integer(required=True),
         "base_referencia_id": fields.Integer(required=True),
         "periodo": fields.String(required=True, example="2026-01"),
+    },
+)
+
+modelo_avaliacao_lote = namespace_avaliacoes.model(
+    "AvaliacaoLoteEntrada",
+    {
+        "base_referencia_id": fields.Integer(required=True),
+        "periodo_inicial": fields.String(required=True, example="2026-04"),
+        "periodo_final": fields.String(required=True, example="2026-06"),
     },
 )
 
@@ -978,11 +987,23 @@ class PerfisImportacaoResource(Resource):
 
 
 @namespace_bases.route("")
+@namespace_bases.doc(security="Bearer")
 class BasesResource(Resource):
+    @namespace_bases.doc(params={"projeto_id": "Filtra as bases pelo projeto informado."})
+    @autenticacao_obrigatoria
     def get(self):
-        return [base_para_dict(item) for item in BaseReferencia.query.order_by(BaseReferencia.id).all()]
+        consulta = BaseReferencia.query
+        projeto_id_informado = request.args.get("projeto_id")
+        if projeto_id_informado is not None:
+            try:
+                projeto_id = int(projeto_id_informado)
+            except ValueError:
+                namespace_bases.abort(400, "O projeto_id deve ser um número inteiro.")
+            consulta = consulta.filter_by(projeto_id=projeto_id)
+        return [base_para_dict(item) for item in consulta.order_by(BaseReferencia.id).all()]
 
     @namespace_bases.expect(modelo_base, validate=True)
+    @autenticacao_obrigatoria
     def post(self):
         dados = request.json
         grupo = banco.session.get(GrupoComparavel, dados["grupo_id"])
@@ -1014,7 +1035,9 @@ class BasesResource(Resource):
 
 
 @namespace_bases.route("/<int:base_id>")
+@namespace_bases.doc(security="Bearer")
 class BaseResource(Resource):
+    @autenticacao_obrigatoria
     def get(self, base_id):
         base = banco.session.get(BaseReferencia, base_id)
         if base is None:
@@ -1023,7 +1046,9 @@ class BaseResource(Resource):
 
 
 @namespace_bases.route("/<int:base_id>/processar")
+@namespace_bases.doc(security="Bearer")
 class ProcessarBaseResource(Resource):
+    @autenticacao_obrigatoria
     def post(self, base_id):
         try:
             return base_para_dict(processar_base_referencia(base_id))
@@ -1033,8 +1058,10 @@ class ProcessarBaseResource(Resource):
 
 
 @namespace_bases.route("/<int:base_id>/pesos")
+@namespace_bases.doc(security="Bearer")
 class PesosBaseResource(Resource):
     @namespace_bases.expect(modelo_pesos, validate=True)
+    @autenticacao_obrigatoria
     def patch(self, base_id):
         pesos = {int(chave): valor for chave, valor in request.json["pesos"].items()}
         try:
@@ -1046,7 +1073,9 @@ class PesosBaseResource(Resource):
 
 
 @namespace_bases.route("/<int:base_id>/ativar")
+@namespace_bases.doc(security="Bearer")
 class AtivarBaseResource(Resource):
+    @autenticacao_obrigatoria
     def post(self, base_id):
         try:
             return base_para_dict(ativar_base_referencia(base_id))
@@ -1056,8 +1085,10 @@ class AtivarBaseResource(Resource):
 
 
 @namespace_avaliacoes.route("")
+@namespace_avaliacoes.doc(security="Bearer")
 class AvaliacoesResource(Resource):
     @namespace_avaliacoes.expect(modelo_avaliacao, validate=True)
+    @autenticacao_obrigatoria
     def post(self):
         dados = request.json
         try:
@@ -1070,8 +1101,30 @@ class AvaliacoesResource(Resource):
             namespace_avaliacoes.abort(400, str(erro))
 
 
+@namespace_avaliacoes.route("/processar-lote")
+@namespace_avaliacoes.doc(security="Bearer")
+class ProcessarAvaliacoesLoteResource(Resource):
+    @namespace_avaliacoes.expect(modelo_avaliacao_lote, validate=True)
+    @autenticacao_obrigatoria
+    def post(self):
+        """Calcula entidades elegíveis e períodos sem sobrescrever avaliações existentes."""
+
+        dados = request.json
+        try:
+            return processar_avaliacoes_em_lote(
+                dados["base_referencia_id"],
+                dados["periodo_inicial"],
+                dados["periodo_final"],
+            )
+        except ValueError as erro:
+            banco.session.rollback()
+            namespace_avaliacoes.abort(400, str(erro))
+
+
 @namespace_avaliacoes.route("/<int:avaliacao_id>")
+@namespace_avaliacoes.doc(security="Bearer")
 class AvaliacaoResource(Resource):
+    @autenticacao_obrigatoria
     def get(self, avaliacao_id):
         avaliacao = banco.session.get(Avaliacao, avaliacao_id)
         if avaliacao is None:

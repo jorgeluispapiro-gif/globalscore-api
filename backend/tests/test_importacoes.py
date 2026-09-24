@@ -18,12 +18,15 @@ from app.modelos import (
     GrupoComparavel,
     Importacao,
     Indicador,
+    IndicadorBaseReferencia,
     Observacao,
     PerfilImportacao,
     Projeto,
+    ReguaPercentil,
 )
 from app.servicos import importacoes as servico_importacoes
 from app.servicos import autenticacao as servico_autenticacao
+from app.servicos.motor_percentil import construir_regua_percentil
 
 
 @pytest.fixture(scope="module")
@@ -172,6 +175,76 @@ def ativar_autenticacao_de_teste(aplicacao, monkeypatch):
         "validar_token_supabase",
         lambda _token: {"id": "usuario-supabase-123", "email": "usuario@email.com"},
     )
+
+
+def preparar_base_ativa_para_lote(projeto_id, grupo_id, entidade_id, indicador_id):
+    """Monta uma referência pequena para testar somente a orquestração do lote."""
+
+    segunda_entidade = Entidade(
+        projeto_id=projeto_id,
+        grupo_id=grupo_id,
+        codigo="002",
+        nome="Unidade 002",
+    )
+    banco.session.add(segunda_entidade)
+    banco.session.flush()
+    base = BaseReferencia(
+        projeto_id=projeto_id,
+        grupo_id=grupo_id,
+        modo="ENTRE_ENTIDADES",
+        nome="Referência ativa do lote",
+        versao=1,
+        periodo_inicial="2026-01",
+        periodo_final="2026-03",
+        status="ATIVA",
+        criada_por="usuario-supabase-123",
+    )
+    banco.session.add(base)
+    banco.session.flush()
+    indicador_base = IndicadorBaseReferencia(
+        base_referencia_id=base.id,
+        indicador_id=indicador_id,
+        status="VALIDO",
+        participa_global_score=True,
+        peso_aplicado=100,
+        direcao_aplicada="MAIOR_MELHOR",
+        tamanho_populacao=3,
+        valor_minimo=10,
+        valor_maximo=30,
+    )
+    banco.session.add(indicador_base)
+    banco.session.flush()
+    banco.session.add_all(
+        ReguaPercentil(
+            indicador_base_referencia_id=indicador_base.id,
+            percentil=percentil,
+            valor_corte=corte,
+        )
+        for percentil, corte in construir_regua_percentil(
+            [10, 20, 30], "MAIOR_MELHOR"
+        ).items()
+    )
+    for id_entidade in (entidade_id, segunda_entidade.id):
+        for periodo, valor in (("2026-04", 15), ("2026-05", 25)):
+            banco.session.add(
+                Observacao(
+                    projeto_id=projeto_id,
+                    entidade_id=id_entidade,
+                    indicador_id=indicador_id,
+                    periodo=periodo,
+                    valor=valor,
+                )
+            )
+    banco.session.commit()
+    return base
+
+
+def payload_avaliacao_lote(base_id):
+    return {
+        "base_referencia_id": base_id,
+        "periodo_inicial": "2026-04",
+        "periodo_final": "2026-05",
+    }
 
 
 def test_csv_valido_cria_observacao(ambiente):
@@ -1021,3 +1094,77 @@ def test_perfil_alheio_e_referencia_inativa_nao_podem_ser_aplicados(
     assert resposta_inativa.status_code == 409
     assert "precisa ser revisado" in resposta_inativa.get_json()["message"]
     assert banco.session.get(Importacao, lote_usuario_a).perfil_importacao_id is None
+
+
+def test_lote_duas_entidades_e_dois_periodos_cria_quatro_avaliacoes(
+    ambiente, monkeypatch
+):
+    aplicacao, cliente, projeto_id, grupo_id, entidade_id, indicador_id = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    base = preparar_base_ativa_para_lote(
+        projeto_id, grupo_id, entidade_id, indicador_id
+    )
+
+    resposta = cliente.post(
+        "/avaliacoes/processar-lote",
+        json=payload_avaliacao_lote(base.id),
+        headers=cabecalho_autenticacao(),
+    )
+
+    assert resposta.status_code == 200
+    dados = resposta.get_json()
+    assert dados["quantidade_processadas"] == 4
+    assert dados["quantidade_incompletas"] == 0
+    assert dados["quantidade_ja_existentes"] == 0
+    assert dados["quantidade_erros"] == 0
+    assert len(dados["resultados"]) == 4
+    assert {item["status"] for item in dados["resultados"]} == {"CALCULADA"}
+    assert Avaliacao.query.count() == 4
+
+
+def test_repetir_lote_retorna_ja_existente_sem_duplicar(ambiente, monkeypatch):
+    aplicacao, cliente, projeto_id, grupo_id, entidade_id, indicador_id = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    base = preparar_base_ativa_para_lote(
+        projeto_id, grupo_id, entidade_id, indicador_id
+    )
+    argumentos = {
+        "json": payload_avaliacao_lote(base.id),
+        "headers": cabecalho_autenticacao(),
+    }
+    assert cliente.post("/avaliacoes/processar-lote", **argumentos).status_code == 200
+
+    repeticao = cliente.post("/avaliacoes/processar-lote", **argumentos)
+
+    assert repeticao.status_code == 200
+    dados = repeticao.get_json()
+    assert dados["quantidade_processadas"] == 0
+    assert dados["quantidade_ja_existentes"] == 4
+    assert {item["status"] for item in dados["resultados"]} == {"JA_EXISTENTE"}
+    assert Avaliacao.query.count() == 4
+
+
+def test_base_nao_ativa_bloqueia_lote_antes_do_processamento(
+    ambiente, monkeypatch
+):
+    aplicacao, cliente, projeto_id, grupo_id, entidade_id, indicador_id = ambiente
+    ativar_autenticacao_de_teste(aplicacao, monkeypatch)
+    base = preparar_base_ativa_para_lote(
+        projeto_id, grupo_id, entidade_id, indicador_id
+    )
+    base.status = "PROCESSADA"
+    banco.session.commit()
+
+    sem_token = cliente.post(
+        "/avaliacoes/processar-lote", json=payload_avaliacao_lote(base.id)
+    )
+    resposta = cliente.post(
+        "/avaliacoes/processar-lote",
+        json=payload_avaliacao_lote(base.id),
+        headers=cabecalho_autenticacao(),
+    )
+
+    assert sem_token.status_code == 401
+    assert resposta.status_code == 400
+    assert "ativa" in resposta.get_json()["message"]
+    assert Avaliacao.query.count() == 0
