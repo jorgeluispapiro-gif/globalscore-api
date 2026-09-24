@@ -888,13 +888,48 @@ def test_mesma_estrutura_reconhece_e_aplica_perfil_sem_criar_negocio(ambiente):
     )
 
 
-def test_coluna_extra_nao_e_compativel_com_perfil(ambiente):
+def test_colunas_reordenadas_e_extra_retornam_diferencas_estruturadas(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    perfil_id = criar_perfil_existente(cliente, projeto_id, indicador_id)
+    nova_importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "coluna-extra.csv",
+        b"periodo;codigo;vendas;qualidade\n02/2026;001;110;90\n",
+    )
+
+    resposta = cliente.post(
+        f"/importacoes/{nova_importacao_id}/reconhecer-perfil"
+    )
+    assert resposta.status_code == 200
+    dados = resposta.get_json()
+    assert dados["resultado"] == "COMPATIVEL_COM_DIFERENCAS"
+    assert dados["perfil_sugerido"]["id"] == perfil_id
+    diferencas_por_tipo = {item["tipo"]: item for item in dados["diferencas"]}
+    assert diferencas_por_tipo["COLUNA_NOVA"] == {
+        "tipo": "COLUNA_NOVA",
+        "indice_coluna": 4,
+        "nome": "qualidade",
+    }
+    assert diferencas_por_tipo["ORDEM_ALTERADA"]["ordem_perfil"] == [
+        "codigo",
+        "periodo",
+        "vendas",
+    ]
+    assert diferencas_por_tipo["ORDEM_ALTERADA"]["ordem_atual"] == [
+        "periodo",
+        "codigo",
+        "vendas",
+    ]
+
+
+def test_coluna_nova_nao_e_sugerida_silenciosamente_como_ignorada(ambiente):
     _, cliente, projeto_id, _, _, indicador_id = ambiente
     criar_perfil_existente(cliente, projeto_id, indicador_id)
     nova_importacao_id = enviar(
         cliente,
         projeto_id,
-        "coluna-extra.csv",
+        "coluna-pendente.csv",
         b"codigo;periodo;vendas;qualidade\n001;02/2026;110;90\n",
     )
 
@@ -902,10 +937,18 @@ def test_coluna_extra_nao_e_compativel_com_perfil(ambiente):
         f"/importacoes/{nova_importacao_id}/reconhecer-perfil"
     )
     assert resposta.status_code == 200
-    assert resposta.get_json() == {
-        "resultado": "INCOMPATIVEL",
-        "perfil_sugerido": None,
-    }
+    dados = resposta.get_json()
+    assert dados["resultado"] == "COMPATIVEL_COM_DIFERENCAS"
+    assert any(
+        item["tipo"] == "COLUNA_NOVA" and item["indice_coluna"] == 4
+        for item in dados["diferencas"]
+    )
+    colunas_sugeridas = dados["mapeamento_sugerido"]["colunas"]
+    assert all(item["indice_coluna"] != 4 for item in colunas_sugeridas)
+    assert not any(
+        item["indice_coluna"] == 4 and item["papel"] == "IGNORAR"
+        for item in colunas_sugeridas
+    )
 
 
 def test_perfil_alheio_e_referencia_inativa_nao_podem_ser_aplicados(
@@ -950,6 +993,23 @@ def test_perfil_alheio_e_referencia_inativa_nao_podem_ser_aplicados(
     indicador = banco.session.get(Indicador, indicador_id)
     indicador.ativo = False
     banco.session.commit()
+    reconhecimento_inativo = cliente.post(
+        f"/importacoes/{lote_usuario_a}/reconhecer-perfil",
+        headers=usuario_a,
+    )
+    assert reconhecimento_inativo.status_code == 200
+    assert reconhecimento_inativo.get_json()["resultado"] == (
+        "COMPATIVEL_COM_DIFERENCAS"
+    )
+    assert reconhecimento_inativo.get_json()["diferencas"] == [
+        {
+            "tipo": "REFERENCIA_INVALIDA",
+            "mensagem": (
+                "O perfil precisa ser revisado: existe indicador ausente, inativo "
+                "ou fora do projeto."
+            ),
+        }
+    ]
     resposta_inativa = cliente.post(
         f"/importacoes/{lote_usuario_a}/aplicar-perfil",
         headers=usuario_a,

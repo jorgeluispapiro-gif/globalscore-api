@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import re
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -291,16 +292,173 @@ def ler_fotografia_estrutura_completa(importacao, configuracao_leitura):
     return montar_fotografia_estrutura(importacao, cabecalhos, configuracao)
 
 
+def _estrutura_atual_para_perfil(importacao, perfil):
+    """Lê a estrutura atual com a mesma configuração estrutural do perfil."""
+
+    configuracao = json.loads(perfil.configuracao_leitura_json or "{}")
+    return ler_fotografia_estrutura_completa(importacao, configuracao)
+
+
 def _assinatura_atual_para_perfil(importacao, perfil):
     """Recalcula a assinatura usando a leitura estrutural configurada no perfil."""
 
-    configuracao = json.loads(perfil.configuracao_leitura_json or "{}")
-    estrutura = ler_fotografia_estrutura_completa(importacao, configuracao)
-    return gerar_assinatura_estrutura(estrutura)
+    return gerar_assinatura_estrutura(_estrutura_atual_para_perfil(importacao, perfil))
+
+
+def _agrupar_cabecalhos_por_nome(estrutura):
+    """Agrupa cabeçalhos normalizados para impedir associações ambíguas."""
+
+    agrupados = {}
+    for cabecalho in estrutura.get("cabecalhos", []):
+        nome = cabecalho.get("nome_normalizado", "")
+        agrupados.setdefault(nome, []).append(cabecalho)
+    return agrupados
+
+
+def _comparar_estruturas(estrutura_perfil, estrutura_atual):
+    """Compara nomes exatos e únicos e descreve somente diferenças observáveis."""
+
+    cabecalhos_perfil = estrutura_perfil.get("cabecalhos", [])
+    cabecalhos_atuais = estrutura_atual.get("cabecalhos", [])
+    por_nome_perfil = _agrupar_cabecalhos_por_nome(estrutura_perfil)
+    por_nome_atual = _agrupar_cabecalhos_por_nome(estrutura_atual)
+    nomes_seguros = {
+        nome
+        for nome, itens_perfil in por_nome_perfil.items()
+        if len(itens_perfil) == 1 and len(por_nome_atual.get(nome, [])) == 1
+    }
+    correspondencias = {
+        por_nome_perfil[nome][0]["indice_coluna"]: por_nome_atual[nome][0]
+        for nome in nomes_seguros
+    }
+
+    diferencas = []
+    for cabecalho in cabecalhos_atuais:
+        if cabecalho.get("nome_normalizado") not in nomes_seguros:
+            diferencas.append(
+                {
+                    "tipo": "COLUNA_NOVA",
+                    "indice_coluna": cabecalho["indice_coluna"],
+                    "nome": cabecalho["nome_original"],
+                }
+            )
+    for cabecalho in cabecalhos_perfil:
+        if cabecalho.get("nome_normalizado") not in nomes_seguros:
+            diferencas.append(
+                {
+                    "tipo": "COLUNA_REMOVIDA",
+                    "indice_coluna": cabecalho["indice_coluna"],
+                    "nome": cabecalho["nome_original"],
+                }
+            )
+
+    ordem_perfil = [
+        item["nome_normalizado"]
+        for item in cabecalhos_perfil
+        if item.get("nome_normalizado") in nomes_seguros
+    ]
+    ordem_atual = [
+        item["nome_normalizado"]
+        for item in cabecalhos_atuais
+        if item.get("nome_normalizado") in nomes_seguros
+    ]
+    if ordem_perfil != ordem_atual:
+        diferencas.append(
+            {
+                "tipo": "ORDEM_ALTERADA",
+                "ordem_perfil": ordem_perfil,
+                "ordem_atual": ordem_atual,
+            }
+        )
+    return correspondencias, diferencas
+
+
+def _montar_mapeamento_sugerido(perfil, correspondencias):
+    """Reposiciona apenas colunas com nome normalizado exato e único."""
+
+    mapeamento_perfil = json.loads(perfil.mapeamento_json or "{}")
+    sugerido = {
+        chave: deepcopy(valor)
+        for chave, valor in mapeamento_perfil.items()
+        if chave != "colunas"
+    }
+    colunas = []
+    for coluna in mapeamento_perfil.get("colunas", []):
+        cabecalho_atual = correspondencias.get(coluna.get("indice_coluna"))
+        if cabecalho_atual is None:
+            continue
+        coluna_sugerida = deepcopy(coluna)
+        coluna_sugerida["indice_coluna"] = cabecalho_atual["indice_coluna"]
+        colunas.append(coluna_sugerida)
+    sugerido["colunas"] = sorted(colunas, key=lambda item: item["indice_coluna"])
+    return sugerido
+
+
+def _contar_ancoras_perfil(perfil, correspondencias):
+    """Conta somente papéis conhecidos que possuem correspondência estrutural segura."""
+
+    mapeamento = json.loads(perfil.mapeamento_json or "{}")
+    estruturais = 0
+    indicadores = 0
+    for coluna in mapeamento.get("colunas", []):
+        if coluna.get("indice_coluna") not in correspondencias:
+            continue
+        if coluna.get("papel") in {"CODIGO_ENTIDADE", "PERIODO"}:
+            estruturais += 1
+        elif coluna.get("papel") == "VALOR_INDICADOR":
+            indicadores += 1
+    return estruturais, indicadores
+
+
+def _diferencas_referencias(perfil):
+    """Transforma uma referência inválida em pendência explícita de revisão."""
+
+    try:
+        validar_referencias_perfil(perfil)
+    except PerfilPrecisaRevisaoError as erro:
+        return [{"tipo": "REFERENCIA_INVALIDA", "mensagem": str(erro)}]
+    return []
+
+
+def _analisar_perfil(importacao, perfil):
+    """Produz uma análise determinística, sem inferir nomes aproximados."""
+
+    estrutura_perfil = json.loads(perfil.estrutura_json or "{}")
+    estrutura_atual = _estrutura_atual_para_perfil(importacao, perfil)
+    assinatura_exata = gerar_assinatura_estrutura(estrutura_atual) == perfil.assinatura_estrutura
+    correspondencias, diferencas = _comparar_estruturas(
+        estrutura_perfil, estrutura_atual
+    )
+    diferencas_referencias = _diferencas_referencias(perfil)
+    estruturais, indicadores = _contar_ancoras_perfil(perfil, correspondencias)
+    ancora_suficiente = (
+        (estruturais >= 1 and indicadores >= 1) or indicadores >= 2
+    )
+    if not assinatura_exata and not ancora_suficiente:
+        return None
+
+    todas_diferencas = diferencas + diferencas_referencias
+    return {
+        "perfil": perfil,
+        "assinatura_exata": assinatura_exata,
+        "referencias_validas": not diferencas_referencias,
+        "diferencas": todas_diferencas,
+        "mapeamento_sugerido": _montar_mapeamento_sugerido(
+            perfil, correspondencias
+        ),
+        # A tupla ordena candidatos por evidência objetiva. Empate permanece ambíguo.
+        "pontuacao": (
+            int(assinatura_exata),
+            estruturais + indicadores,
+            indicadores,
+            estruturais,
+            len(correspondencias),
+        ),
+    }
 
 
 def reconhecer_perfil_importacao(importacao, criado_por):
-    """Localiza somente correspondências estruturais exatas e informa ambiguidades."""
+    """Reconhece estruturas exatas ou parcialmente compatíveis sem fuzzy matching."""
 
     caminho = Path(importacao.caminho_arquivo_temporario or "")
     if not caminho.is_file():
@@ -312,26 +470,55 @@ def reconhecer_perfil_importacao(importacao, criado_por):
         ativo=True,
         tipo_arquivo=importacao.tipo_arquivo,
     ).order_by(PerfilImportacao.id).all()
-    compativeis = []
+    exatos = []
+    parciais = []
     for perfil in candidatos:
         try:
-            assinatura_atual = _assinatura_atual_para_perfil(importacao, perfil)
+            analise = _analisar_perfil(importacao, perfil)
         except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
             continue
-        if assinatura_atual == perfil.assinatura_estrutura:
-            compativeis.append(perfil)
+        if analise is None:
+            continue
+        if analise["assinatura_exata"] and analise["referencias_validas"]:
+            exatos.append(analise)
+        else:
+            parciais.append(analise)
 
-    if not compativeis:
-        return {"resultado": "INCOMPATIVEL", "perfil_sugerido": None}
-    if len(compativeis) == 1:
+    if len(exatos) == 1:
         return {
             "resultado": "COMPATIVEL",
-            "perfil_sugerido": _resumo_perfil_sugerido(compativeis[0]),
+            "perfil_sugerido": _resumo_perfil_sugerido(exatos[0]["perfil"]),
         }
+    if len(exatos) > 1:
+        return {
+            "resultado": "AMBIGUO",
+            "perfil_sugerido": None,
+            "candidatos": [
+                _resumo_perfil_sugerido(item["perfil"]) for item in exatos
+            ],
+        }
+    if not parciais:
+        return {"resultado": "INCOMPATIVEL", "perfil_sugerido": None}
+
+    melhor_pontuacao = max(item["pontuacao"] for item in parciais)
+    melhores = [
+        item for item in parciais if item["pontuacao"] == melhor_pontuacao
+    ]
+    if len(melhores) > 1:
+        return {
+            "resultado": "AMBIGUO",
+            "perfil_sugerido": None,
+            "candidatos": [
+                _resumo_perfil_sugerido(item["perfil"]) for item in melhores
+            ],
+        }
+
+    melhor = melhores[0]
     return {
-        "resultado": "AMBIGUO",
-        "perfil_sugerido": None,
-        "candidatos": [_resumo_perfil_sugerido(perfil) for perfil in compativeis],
+        "resultado": "COMPATIVEL_COM_DIFERENCAS",
+        "perfil_sugerido": _resumo_perfil_sugerido(melhor["perfil"]),
+        "diferencas": melhor["diferencas"],
+        "mapeamento_sugerido": melhor["mapeamento_sugerido"],
     }
 
 
