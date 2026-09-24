@@ -30,14 +30,21 @@ from app.servicos.bases_referencia import (
 from app.servicos.importacoes import (
     AlertasPendentesError,
     DependenciasImportacaoError,
+    PerfilIncompativelError,
     anular_importacao,
+    aplicar_perfil_importacao,
     confirmar_importacao,
     importacao_para_dict,
     inspecionar_arquivo,
     receber_arquivo,
+    reconhecer_perfil_importacao,
     validar_importacao,
 )
-from app.servicos.perfis_importacao import criar_perfil_importacao, perfil_para_dict
+from app.servicos.perfis_importacao import (
+    PerfilPrecisaRevisaoError,
+    criar_perfil_importacao,
+    perfil_para_dict,
+)
 from werkzeug.datastructures import FileStorage
 
 
@@ -119,6 +126,11 @@ modelo_perfil_importacao = namespace_perfis_importacao.model(
         "importacao_id": fields.Integer(required=True),
         "nome": fields.String(required=True),
     },
+)
+
+modelo_aplicacao_perfil = namespace_importacoes.model(
+    "AplicacaoPerfilImportacaoEntrada",
+    {"perfil_id": fields.Integer(required=True)},
 )
 
 
@@ -754,6 +766,55 @@ class ImportacaoResource(Resource):
 
         importacao = obter_importacao_do_usuario(importacao_id)
         return importacao_para_dict(importacao)
+
+
+@namespace_importacoes.route("/<int:importacao_id>/reconhecer-perfil")
+@namespace_importacoes.doc(security="Bearer")
+class ReconhecerPerfilImportacaoResource(Resource):
+    @namespace_importacoes.response(404, "Importação não encontrada.")
+    @autenticacao_obrigatoria
+    def post(self, importacao_id):
+        """Compara a estrutura completa sem persistir dados de negócio."""
+
+        importacao = obter_importacao_do_usuario(importacao_id)
+        try:
+            return reconhecer_perfil_importacao(
+                importacao, g.usuario_autenticado["id"]
+            )
+        except ValueError as erro:
+            namespace_importacoes.abort(409, str(erro))
+
+
+@namespace_importacoes.route("/<int:importacao_id>/aplicar-perfil")
+@namespace_importacoes.doc(security="Bearer")
+class AplicarPerfilImportacaoResource(Resource):
+    @namespace_importacoes.expect(modelo_aplicacao_perfil, validate=True)
+    @namespace_importacoes.response(404, "Importação ou perfil não encontrado.")
+    @autenticacao_obrigatoria
+    def post(self, importacao_id):
+        """Copia a configuração após recalcular a compatibilidade exata."""
+
+        importacao = obter_importacao_do_usuario(importacao_id)
+        perfil = banco.session.get(PerfilImportacao, request.json["perfil_id"])
+        if perfil is None or perfil.criado_por != g.usuario_autenticado["id"]:
+            namespace_importacoes.abort(404, "Perfil de importação não encontrado.")
+        try:
+            aplicar_perfil_importacao(importacao, perfil)
+            return {
+                "resultado": "APLICADO",
+                "perfil_aplicado": {
+                    "id": perfil.id,
+                    "nome": perfil.nome,
+                    "versao": perfil.versao,
+                },
+                "importacao": importacao_para_dict(importacao),
+            }
+        except (PerfilIncompativelError, PerfilPrecisaRevisaoError) as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(409, str(erro))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as erro:
+            banco.session.rollback()
+            namespace_importacoes.abort(400, str(erro))
 
 
 @namespace_importacoes.route("/<int:importacao_id>/inspecao")

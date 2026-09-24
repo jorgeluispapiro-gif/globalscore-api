@@ -129,6 +129,14 @@ class Importacao(banco.Model):
     # Fotografia estrutural sem valores das linhas; continua disponível após apagar o arquivo.
     estrutura_json = banco.Column(banco.Text)
     mapeamento_json = banco.Column(banco.Text)
+    perfil_importacao_id = banco.Column(
+        banco.ForeignKey(
+            "perfis_importacao.id",
+            name="fk_importacao_perfil_aplicado",
+            use_alter=True,
+        ),
+        index=True,
+    )
     quantidade_linhas_lidas = banco.Column(banco.Integer, nullable=False, default=0)
     quantidade_linhas_validas = banco.Column(banco.Integer, nullable=False, default=0)
     quantidade_erros = banco.Column(banco.Integer, nullable=False, default=0)
@@ -145,6 +153,9 @@ class Importacao(banco.Model):
 
     projeto = banco.relationship("Projeto", backref="importacoes")
     observacoes = banco.relationship("Observacao", backref="importacao", lazy=True)
+    perfil_aplicado = banco.relationship(
+        "PerfilImportacao", foreign_keys=[perfil_importacao_id]
+    )
 
 
 class PerfilImportacao(banco.Model):
@@ -176,7 +187,11 @@ class PerfilImportacao(banco.Model):
     )
 
     projeto = banco.relationship("Projeto", backref="perfis_importacao")
-    importacao_origem = banco.relationship("Importacao", backref="perfil_importacao")
+    importacao_origem = banco.relationship(
+        "Importacao",
+        foreign_keys=[importacao_origem_id],
+        backref="perfil_importacao_criado",
+    )
 
 
 class BaseReferencia(banco.Model):

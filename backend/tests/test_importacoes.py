@@ -12,6 +12,8 @@ from app import criar_aplicacao
 from app.configuracao import ConfiguracaoTeste
 from app.extensoes import banco
 from app.modelos import (
+    Avaliacao,
+    BaseReferencia,
     Entidade,
     GrupoComparavel,
     Importacao,
@@ -90,9 +92,10 @@ def payload_largo(indicador_id, *, linha_final=None):
     }
 
 
-def enviar(cliente, projeto_id, nome, conteudo):
+def enviar(cliente, projeto_id, nome, conteudo, headers=None):
     resposta = cliente.post(
         "/importacoes",
+        headers=headers,
         data={"projeto_id": str(projeto_id), "arquivo": (io.BytesIO(conteudo), nome)},
         content_type="multipart/form-data",
     )
@@ -806,3 +809,152 @@ def test_outro_usuario_nao_cria_perfil_de_lote_alheio(ambiente, monkeypatch):
     assert resposta.status_code == 404
     assert resposta.get_json()["message"] == "Importação não encontrada."
     assert PerfilImportacao.query.count() == 0
+
+
+def criar_perfil_existente(
+    cliente, projeto_id, indicador_id, headers=None, nome="Perfil mensal"
+):
+    """Prepara um perfil real pelo fluxo público usado pelo gestor."""
+
+    importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "origem-perfil.csv",
+        b"codigo;periodo;vendas\n001;01/2026;100\n",
+        headers=headers,
+    )
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/validar",
+        headers=headers,
+        json=payload_largo(indicador_id),
+    ).status_code == 200
+    assert cliente.post(
+        f"/importacoes/{importacao_id}/confirmar", headers=headers
+    ).status_code == 200
+    resposta = cliente.post(
+        "/perfis-importacao",
+        headers=headers,
+        json={"importacao_id": importacao_id, "nome": nome},
+    )
+    assert resposta.status_code == 201, resposta.get_json()
+    return resposta.get_json()["id"]
+
+
+def test_mesma_estrutura_reconhece_e_aplica_perfil_sem_criar_negocio(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    perfil_id = criar_perfil_existente(cliente, projeto_id, indicador_id)
+    quantidades_antes = (
+        Entidade.query.count(),
+        Indicador.query.count(),
+        Observacao.query.count(),
+        Avaliacao.query.count(),
+        BaseReferencia.query.count(),
+    )
+    nova_importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "novo-lote.csv",
+        b"codigo;periodo;vendas\n001;02/2026;110\n",
+    )
+
+    reconhecimento = cliente.post(
+        f"/importacoes/{nova_importacao_id}/reconhecer-perfil"
+    )
+    assert reconhecimento.status_code == 200
+    assert reconhecimento.get_json() == {
+        "resultado": "COMPATIVEL",
+        "perfil_sugerido": {
+            "id": perfil_id,
+            "nome": "Perfil mensal",
+            "versao": 1,
+        },
+    }
+    aplicacao = cliente.post(
+        f"/importacoes/{nova_importacao_id}/aplicar-perfil",
+        json={"perfil_id": perfil_id},
+    )
+    assert aplicacao.status_code == 200, aplicacao.get_json()
+    lote = banco.session.get(Importacao, nova_importacao_id)
+    perfil = banco.session.get(PerfilImportacao, perfil_id)
+    assert lote.perfil_importacao_id == perfil.id
+    assert lote.configuracao_leitura_json == perfil.configuracao_leitura_json
+    assert lote.mapeamento_json == perfil.mapeamento_json
+    assert quantidades_antes == (
+        Entidade.query.count(),
+        Indicador.query.count(),
+        Observacao.query.count(),
+        Avaliacao.query.count(),
+        BaseReferencia.query.count(),
+    )
+
+
+def test_coluna_extra_nao_e_compativel_com_perfil(ambiente):
+    _, cliente, projeto_id, _, _, indicador_id = ambiente
+    criar_perfil_existente(cliente, projeto_id, indicador_id)
+    nova_importacao_id = enviar(
+        cliente,
+        projeto_id,
+        "coluna-extra.csv",
+        b"codigo;periodo;vendas;qualidade\n001;02/2026;110;90\n",
+    )
+
+    resposta = cliente.post(
+        f"/importacoes/{nova_importacao_id}/reconhecer-perfil"
+    )
+    assert resposta.status_code == 200
+    assert resposta.get_json() == {
+        "resultado": "INCOMPATIVEL",
+        "perfil_sugerido": None,
+    }
+
+
+def test_perfil_alheio_e_referencia_inativa_nao_podem_ser_aplicados(
+    ambiente, monkeypatch
+):
+    aplicacao, cliente, projeto_id, _, _, indicador_id = ambiente
+    monkeypatch.setitem(aplicacao.config, "AUTENTICACAO_OBRIGATORIA", True)
+    monkeypatch.setattr(
+        servico_autenticacao,
+        "validar_token_supabase",
+        lambda token: {"id": token, "email": f"{token}@email.com"},
+    )
+    usuario_a = cabecalho_autenticacao("usuario-a")
+    usuario_b = cabecalho_autenticacao("usuario-b")
+    perfil_id = criar_perfil_existente(
+        cliente, projeto_id, indicador_id, headers=usuario_a
+    )
+    lote_usuario_b = enviar(
+        cliente,
+        projeto_id,
+        "lote-b.csv",
+        b"codigo;periodo;vendas\n001;02/2026;110\n",
+        headers=usuario_b,
+    )
+    resposta_alheia = cliente.post(
+        f"/importacoes/{lote_usuario_b}/aplicar-perfil",
+        headers=usuario_b,
+        json={"perfil_id": perfil_id},
+    )
+    assert resposta_alheia.status_code == 404
+    assert resposta_alheia.get_json()["message"] == (
+        "Perfil de importação não encontrado."
+    )
+
+    lote_usuario_a = enviar(
+        cliente,
+        projeto_id,
+        "lote-a.csv",
+        b"codigo;periodo;vendas\n001;03/2026;120\n",
+        headers=usuario_a,
+    )
+    indicador = banco.session.get(Indicador, indicador_id)
+    indicador.ativo = False
+    banco.session.commit()
+    resposta_inativa = cliente.post(
+        f"/importacoes/{lote_usuario_a}/aplicar-perfil",
+        headers=usuario_a,
+        json={"perfil_id": perfil_id},
+    )
+    assert resposta_inativa.status_code == 409
+    assert "precisa ser revisado" in resposta_inativa.get_json()["message"]
+    assert banco.session.get(Importacao, lote_usuario_a).perfil_importacao_id is None

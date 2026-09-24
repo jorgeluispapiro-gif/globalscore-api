@@ -6,10 +6,14 @@ import unicodedata
 from copy import deepcopy
 
 from app.extensoes import banco
-from app.modelos import Importacao, Indicador, PerfilImportacao
+from app.modelos import Entidade, Importacao, Indicador, PerfilImportacao
 
 
 VERSAO_ASSINATURA = 1
+
+
+class PerfilPrecisaRevisaoError(ValueError):
+    """Indica que uma referência persistida deixou de ser válida para aplicação."""
 
 
 def normalizar_cabecalho(valor):
@@ -117,6 +121,59 @@ def normalizar_mapeamento_perfil(mapeamento, projeto_id):
         if decisao.get("acao") in {"ASSOCIAR", "IGNORAR"}
     }
     return normalizado
+
+
+def validar_referencias_perfil(perfil):
+    """Confere IDs persistidos sem criar ou alterar cadastros do projeto."""
+
+    mapeamento = json.loads(perfil.mapeamento_json or "{}")
+    decisoes_indicadores = [
+        coluna.get("indicador")
+        for coluna in mapeamento.get("colunas", [])
+        if coluna.get("indicador")
+    ]
+    decisoes_indicadores.extend(
+        mapeamento.get("decisoes_indicadores", {}).values()
+    )
+    for decisao in decisoes_indicadores:
+        acao = decisao.get("acao")
+        if acao == "IGNORAR":
+            continue
+        if acao not in {"ASSOCIAR", "EXISTENTE"}:
+            raise PerfilPrecisaRevisaoError(
+                "O perfil precisa ser revisado: existe decisão de indicador "
+                "que não pode ser reutilizada."
+            )
+        indicador = banco.session.get(Indicador, decisao.get("indicador_id"))
+        if (
+            indicador is None
+            or indicador.projeto_id != perfil.projeto_id
+            or not indicador.ativo
+        ):
+            raise PerfilPrecisaRevisaoError(
+                "O perfil precisa ser revisado: existe indicador ausente, inativo "
+                "ou fora do projeto."
+            )
+
+    for decisao in mapeamento.get("decisoes_entidades", {}).values():
+        acao = decisao.get("acao")
+        if acao == "IGNORAR":
+            continue
+        if acao != "ASSOCIAR":
+            raise PerfilPrecisaRevisaoError(
+                "O perfil precisa ser revisado: existe decisão de entidade "
+                "que não pode ser reutilizada."
+            )
+        entidade = banco.session.get(Entidade, decisao.get("entidade_id"))
+        if (
+            entidade is None
+            or entidade.projeto_id != perfil.projeto_id
+            or not entidade.ativa
+        ):
+            raise PerfilPrecisaRevisaoError(
+                "O perfil precisa ser revisado: existe entidade associada ausente, "
+                "inativa ou fora do projeto."
+            )
 
 
 def criar_perfil_importacao(importacao, nome, criado_por):

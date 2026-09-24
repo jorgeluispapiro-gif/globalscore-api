@@ -25,12 +25,18 @@ from app.modelos import (
     ItemAvaliacao,
     ItemPopulacaoReferencia,
     Observacao,
+    PerfilImportacao,
     Projeto,
     ValorConsolidadoBase,
 )
 from app.modelos.entidades import agora_utc
 from app.servicos.motor_percentil import calcular_percentil_inc
-from app.servicos.perfis_importacao import montar_fotografia_estrutura
+from app.servicos.perfis_importacao import (
+    PerfilPrecisaRevisaoError,
+    gerar_assinatura_estrutura,
+    montar_fotografia_estrutura,
+    validar_referencias_perfil,
+)
 
 
 FORMATOS_ACEITOS = {".csv": "CSV", ".xlsx": "XLSX"}
@@ -58,6 +64,14 @@ class DependenciasImportacaoError(ValueError):
         )
 
 
+class PerfilIncompativelError(ValueError):
+    """Impede aplicação quando a estrutura atual difere da estrutura do perfil."""
+
+
+def _resumo_perfil_sugerido(perfil):
+    return {"id": perfil.id, "nome": perfil.nome, "versao": perfil.versao}
+
+
 def importacao_para_dict(importacao, incluir_resumo=True):
     """Serializa metadados sem revelar o caminho temporário do servidor."""
 
@@ -71,6 +85,7 @@ def importacao_para_dict(importacao, incluir_resumo=True):
         "aba_selecionada": importacao.aba_selecionada,
         "configuracao_leitura": _carregar_json(importacao.configuracao_leitura_json),
         "mapeamento": _carregar_json(importacao.mapeamento_json),
+        "perfil_importacao_id": importacao.perfil_importacao_id,
         "quantidade_linhas_lidas": importacao.quantidade_linhas_lidas,
         "quantidade_linhas_validas": importacao.quantidade_linhas_validas,
         "quantidade_erros": importacao.quantidade_erros,
@@ -182,7 +197,7 @@ def _combinar_cabecalhos(linhas, indices, linhas_cabecalho):
     return nomes
 
 
-def _ler_linhas(importacao, configuracao):
+def _ler_linhas(importacao, configuracao, incluir_todas_colunas=False):
     """Lê a região confirmada e preserva números de linha e fórmulas sem cache."""
 
     inicio = int(configuracao.get("linha_inicial", 0))
@@ -190,7 +205,9 @@ def _ler_linhas(importacao, configuracao):
     fim = int(fim) if fim is not None else None
     cabecalhos = configuracao.get("linhas_cabecalho", [])
     indices = configuracao.get("colunas_utilizadas", [])
-    if inicio < 1 or len(cabecalhos) not in {1, 2} or not indices:
+    if inicio < 1 or len(cabecalhos) not in {1, 2} or (
+        not indices and not incluir_todas_colunas
+    ):
         raise ValueError(
             "Informe linha_inicial, uma ou duas linhas_cabecalho e colunas_utilizadas."
         )
@@ -230,6 +247,20 @@ def _ler_linhas(importacao, configuracao):
             livro_bruto.close()
             livro_valores.close()
 
+    if incluir_todas_colunas:
+        numeros_cabecalho = [int(item) for item in cabecalhos]
+        quantidade_colunas = max(
+            (
+                len(linhas[numero - 1])
+                for numero in numeros_cabecalho
+                if numero <= len(linhas)
+            ),
+            default=0,
+        )
+        if quantidade_colunas == 0:
+            raise ValueError("Não foi possível identificar os cabeçalhos do arquivo.")
+        indices = list(range(1, quantidade_colunas + 1))
+
     nomes = _combinar_cabecalhos(linhas, indices, [int(item) for item in cabecalhos])
     registros = []
     limite = min(fim or len(linhas), len(linhas))
@@ -243,6 +274,91 @@ def _ler_linhas(importacao, configuracao):
             continue
         registros.append({"linha": numero, "valores": valores})
     return nomes, indices, registros, formulas_sem_valor, formatos_celulas
+
+
+def ler_fotografia_estrutura_completa(importacao, configuracao_leitura):
+    """Lê todos os cabeçalhos físicos para que nenhuma coluna passe despercebida."""
+
+    configuracao = dict(configuracao_leitura or {})
+    nomes, indices, *_ = _ler_linhas(
+        importacao, configuracao, incluir_todas_colunas=True
+    )
+    configuracao["colunas_utilizadas"] = indices
+    cabecalhos = [
+        {"indice_coluna": indice, "nome": nome}
+        for indice, nome in zip(indices, nomes)
+    ]
+    return montar_fotografia_estrutura(importacao, cabecalhos, configuracao)
+
+
+def _assinatura_atual_para_perfil(importacao, perfil):
+    """Recalcula a assinatura usando a leitura estrutural configurada no perfil."""
+
+    configuracao = json.loads(perfil.configuracao_leitura_json or "{}")
+    estrutura = ler_fotografia_estrutura_completa(importacao, configuracao)
+    return gerar_assinatura_estrutura(estrutura)
+
+
+def reconhecer_perfil_importacao(importacao, criado_por):
+    """Localiza somente correspondências estruturais exatas e informa ambiguidades."""
+
+    caminho = Path(importacao.caminho_arquivo_temporario or "")
+    if not caminho.is_file():
+        raise ValueError("O arquivo temporário desta importação não está mais disponível.")
+
+    candidatos = PerfilImportacao.query.filter_by(
+        projeto_id=importacao.projeto_id,
+        criado_por=criado_por,
+        ativo=True,
+        tipo_arquivo=importacao.tipo_arquivo,
+    ).order_by(PerfilImportacao.id).all()
+    compativeis = []
+    for perfil in candidatos:
+        try:
+            assinatura_atual = _assinatura_atual_para_perfil(importacao, perfil)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+            continue
+        if assinatura_atual == perfil.assinatura_estrutura:
+            compativeis.append(perfil)
+
+    if not compativeis:
+        return {"resultado": "INCOMPATIVEL", "perfil_sugerido": None}
+    if len(compativeis) == 1:
+        return {
+            "resultado": "COMPATIVEL",
+            "perfil_sugerido": _resumo_perfil_sugerido(compativeis[0]),
+        }
+    return {
+        "resultado": "AMBIGUO",
+        "perfil_sugerido": None,
+        "candidatos": [_resumo_perfil_sugerido(perfil) for perfil in compativeis],
+    }
+
+
+def aplicar_perfil_importacao(importacao, perfil):
+    """Aplica somente configuração e mapeamento após nova conferência exata."""
+
+    if perfil.projeto_id != importacao.projeto_id:
+        raise PerfilIncompativelError("O perfil não pertence ao projeto da importação.")
+    if not perfil.ativo:
+        raise PerfilPrecisaRevisaoError("O perfil está inativo e precisa ser revisado.")
+    if perfil.tipo_arquivo != importacao.tipo_arquivo:
+        raise PerfilIncompativelError("O tipo de arquivo não corresponde ao perfil.")
+
+    assinatura_atual = _assinatura_atual_para_perfil(importacao, perfil)
+    if assinatura_atual != perfil.assinatura_estrutura:
+        raise PerfilIncompativelError(
+            "A estrutura atual não é exatamente compatível com o perfil."
+        )
+    validar_referencias_perfil(perfil)
+
+    importacao.configuracao_leitura_json = perfil.configuracao_leitura_json
+    importacao.mapeamento_json = perfil.mapeamento_json
+    importacao.perfil_importacao_id = perfil.id
+    configuracao = json.loads(perfil.configuracao_leitura_json or "{}")
+    importacao.aba_selecionada = configuracao.get("aba")
+    banco.session.commit()
+    return importacao
 
 
 def _problema(tipo, mensagem, linha=None, coluna=None, valor=None):
