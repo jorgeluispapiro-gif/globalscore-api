@@ -1,0 +1,10 @@
+.git
+.venv
+__pycache__
+*.pyc
+.env
+backend/__pycache__
+backend/.pytest_cache
+backend/.venv
+backend/dados/*.db
+globalscore-frontend
