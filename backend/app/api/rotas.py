@@ -59,6 +59,9 @@ namespace_indicadores = Namespace("indicadores", description="CRUD de indicadore
 namespace_observacoes = Namespace("observacoes", description="Consulta e entrada manual de valores")
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
 namespace_avaliacoes = Namespace("avaliacoes", description="Cálculo do Global Score")
+namespace_analytics = Namespace(
+    "analytics", description="Consultas analíticas para visão gerencial"
+)
 namespace_importacoes = Namespace("importacoes", description="Importação assistida de CSV e XLSX")
 namespace_perfis_importacao = Namespace(
     "perfis-importacao", description="Perfis reutilizáveis de importação"
@@ -1131,3 +1134,69 @@ class AvaliacaoResource(Resource):
         if avaliacao is None:
             namespace_avaliacoes.abort(404, "Avaliação não encontrada.")
         return avaliacao_para_dict(avaliacao)
+
+
+@namespace_analytics.route("/overview")
+@namespace_analytics.doc(security="Bearer")
+class VisaoGeralAnaliticaResource(Resource):
+    @namespace_analytics.doc(
+        params={
+            "projeto_id": "Identificador obrigatório do projeto.",
+            "grupo_id": "Identificador obrigatório do grupo comparável.",
+            "periodo": "Período mensal obrigatório no formato AAAA-MM.",
+        }
+    )
+    @autenticacao_obrigatoria
+    def get(self):
+        """Retorna totais e ranking já preparados para a visão geral."""
+
+        from app.servicos.analytics import (
+            RecursoAnaliticoNaoEncontradoError,
+            obter_visao_geral,
+        )
+
+        projeto_id = request.args.get("projeto_id", type=int)
+        grupo_id = request.args.get("grupo_id", type=int)
+        periodo = request.args.get("periodo", type=str)
+        if projeto_id is None or grupo_id is None or periodo is None:
+            namespace_analytics.abort(
+                400, "Informe projeto_id, grupo_id e periodo para consultar a visão geral."
+            )
+        try:
+            return obter_visao_geral(projeto_id, grupo_id, periodo)
+        except RecursoAnaliticoNaoEncontradoError as erro:
+            namespace_analytics.abort(404, str(erro))
+        except ValueError as erro:
+            namespace_analytics.abort(400, str(erro))
+
+
+@namespace_analytics.route("/entidades/<int:entidade_id>")
+@namespace_analytics.doc(security="Bearer")
+class DetalheAnaliticoEntidadeResource(Resource):
+    @namespace_analytics.doc(
+        params={
+            "base_referencia_id": "Identificador obrigatório da Base de Referência.",
+            "periodo": "Período mensal obrigatório no formato AAAA-MM.",
+        }
+    )
+    @autenticacao_obrigatoria
+    def get(self, entidade_id):
+        """Retorna avaliação, indicadores e evolução de uma entidade."""
+
+        from app.servicos.analytics import (
+            RecursoAnaliticoNaoEncontradoError,
+            obter_detalhe_entidade,
+        )
+
+        base_referencia_id = request.args.get("base_referencia_id", type=int)
+        periodo = request.args.get("periodo", type=str)
+        if base_referencia_id is None or periodo is None:
+            namespace_analytics.abort(
+                400, "Informe base_referencia_id e periodo para consultar a entidade."
+            )
+        try:
+            return obter_detalhe_entidade(entidade_id, base_referencia_id, periodo)
+        except RecursoAnaliticoNaoEncontradoError as erro:
+            namespace_analytics.abort(404, str(erro))
+        except ValueError as erro:
+            namespace_analytics.abort(400, str(erro))

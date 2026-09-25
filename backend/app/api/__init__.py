@@ -22,6 +22,7 @@ def registrar_namespaces():
 
     from app.api.rotas import (
         namespace_avaliacoes,
+        namespace_analytics,
         namespace_autenticacao,
         namespace_bases,
         namespace_entidades,
@@ -45,3 +46,4 @@ def registrar_namespaces():
     api.add_namespace(namespace_perfis_importacao)
     api.add_namespace(namespace_bases)
     api.add_namespace(namespace_avaliacoes)
+    api.add_namespace(namespace_analytics)
