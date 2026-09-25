@@ -4,7 +4,7 @@ from flask import Flask
 from sqlalchemy import inspect, text
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from app.api import api, registrar_namespaces
+from app.api import init_api
 from app.configuracao import Configuracao
 from app.extensoes import banco
 
@@ -48,8 +48,7 @@ def criar_aplicacao(configuracao=Configuracao):
 
     banco.init_app(aplicacao)
     aplicacao.config["DIRETORIO_IMPORTACOES_TEMPORARIAS"].mkdir(parents=True, exist_ok=True)
-    registrar_namespaces()
-    api.init_app(aplicacao)
+    init_api(aplicacao)
 
     @aplicacao.errorhandler(RequestEntityTooLarge)
     def tratar_upload_muito_grande(_erro):
