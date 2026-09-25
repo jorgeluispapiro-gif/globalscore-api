@@ -1,72 +1,77 @@
 # GlobalScore API
 
 > **MEASURE | COMPARE | ADVANCE**  
-> Backend RESTful do MVP GlobalScore para persistência de dados, construção de Bases de Referência congeladas, motor de cálculo de avaliações ponderadas/percentílicas, importação assistida de dados, analytics comparativos e eventos gerenciais.
+> Backend RESTful do MVP GlobalScore para persistência de dados, importação assistida, construção de Bases de Referência, avaliações percentílicas ponderadas, analytics comparativos e eventos gerenciais.
 
 ---
 
-## 1. Visão Geral e Papel do Backend
+## 1. Visão geral
 
-O **GlobalScore API** é a camada de negócio e persistência do ecossistema GlobalScore. Suas principais responsabilidades são:
+A **GlobalScore API** concentra as regras de negócio e a persistência do GlobalScore. O backend é a fonte de verdade para percentis, pesos e Global Score; o frontend apenas consome e apresenta os resultados calculados.
 
-1. **Gestão de Estrutura de Domínio**: Cadastro e organização de Projetos, Grupos de Comparação, Entidades e Indicadores.
-2. **Importação Assistida Incremental**: Upload de arquivos CSV/XLSX com preview, validação rigorosa (dry-run com detecção estatística de outliers por 3 IQR), alertas de qualidade e confirmação em lote transacional.
-3. **Motor de Cálculo e Avaliação**:
-   - Construção e congelamento de **Bases de Referência** (cálculo automático de estatísticas e limites percentílicos p10–p90);
-   - Cálculo de **Global Score** (escore global de 0,0 a 10,0) para avaliações individuais e em lote;
-   - Atribuição de percentis, pesos e faixas conceituais por indicador.
-4. **Analytics e Storytelling**:
-   - Séries temporais e evolução histórica por entidade;
-   - Ranking relativo entre entidades de uma mesma base/período;
-   - Resumos consolidados e diagnósticos executivos.
-5. **Eventos Gerenciais**: Registro de marcos de intervenção e eventos na linha do tempo.
-6. **Autenticação e Segurança**: Integração com API externa de autenticação (Supabase Auth) e controle de acesso via Bearer Token.
+Principais responsabilidades:
 
----
+1. **Domínio**: projetos, grupos comparáveis, entidades, indicadores e observações.
+2. **Importação assistida incremental**: CSV/XLSX, preview, mapeamento explícito, dry-run, alertas de qualidade e confirmação transacional.
+3. **Bases de Referência**: definição da população comparável, cobertura mínima, congelamento das estatísticas e régua percentílica completa de **P0 a P100**.
+4. **Avaliações**: cálculo individual e em lote, preservando a Base de Referência utilizada.
+5. **Analytics**: visão geral do grupo, ranking quando aplicável, detalhe da entidade, evolução temporal e fatos objetivos do período.
+6. **Eventos gerenciais**: registro de fatos contextuais associados a entidade e período, sem inferência causal sobre o desempenho.
+7. **Autenticação**: validação de Bearer token emitido pelo Supabase Auth.
 
-## 2. Tecnologias Utilizadas
-
-- **Linguagem**: Python 3.11
-- **Framework Web & API**: Flask 3.x, Flask-RESTX (Swagger OpenAPI 2.0/3.0)
-- **ORMs e Persistência**: Flask-SQLAlchemy, SQLite (banco de dados de domínio)
-- **Manipulação de Dados**: `openpyxl` (leitura de XLSX), `csv` (nativo)
-- **Autenticação Externa**: Supabase Auth HTTP API (`urllib.request` nativo, sem SDK pesado)
-- **Containerização**: Docker (imagem Linux leve baseada em `python:3.11-slim`)
-- **Suíte de Testes**: Pytest, Pytest-Flask
+O **Global Score permanece na escala de 0 a 100**. Cada indicador recebe pontuação percentílica entre 0 e 100 e a API calcula a soma ponderada com pesos que totalizam 100%.
 
 ---
 
-## 3. Estrutura do Repositório
+## 2. Tecnologias
+
+- Python 3.11
+- Flask 3.x
+- Flask-RESTX / Swagger UI
+- Flask-SQLAlchemy
+- SQLite
+- openpyxl para leitura de XLSX
+- biblioteca `csv` da própria linguagem
+- Supabase Auth como serviço externo de autenticação
+- Docker
+- Pytest
+
+---
+
+## 3. Estrutura do repositório
 
 ```text
 .
-├── Dockerfile                  # Containerização do backend (raiz)
-├── .dockerignore              # Exclusões para build Docker (raiz)
-├── README.md                  # Documentação principal (raiz)
-├── CONTEXTO_DO_PROJETO.md     # Fonte canônica das regras de negócio
+├── Dockerfile
+├── .dockerignore
+├── README.md
 ├── backend/
-│   ├── app/                   # Código-fonte da aplicação Flask
-│   │   ├── api/               # Namespaces RESTX, DTOs (models) e rotas Swagger
-│   │   ├── modelos/           # Entidades SQLAlchemy e schemas de dados
-│   │   ├── servicos/          # Regras de negócio, motor de cálculo, importações, analytics
-│   │   └── configuracao.py    # Variáveis de ambiente e inicialização do app
-│   ├── dados/                 # Diretório de persistência SQLite (globalscore.db)
-│   ├── tests/                 # Suíte de 57 testes unitários e de integração
-│   ├── executar.py            # Ponto de entrada do servidor Flask (0.0.0.0:5000)
-│   ├── requirements.txt       # Dependências de produção
-│   └── requirements-dev.txt   # Dependências de desenvolvimento e testes
-└── docs/                      # Documentação complementar do projeto
+│   ├── app/
+│   │   ├── api/
+│   │   ├── modelos/
+│   │   ├── servicos/
+│   │   └── configuracao.py
+│   ├── dados/
+│   ├── tests/
+│   ├── executar.py
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   └── .env.example
+└── docs/
 ```
 
 ---
 
-## 4. Requisitos e Configuração de Ambiente
+## 4. Configuração local
 
-### Pre-requisitos
-- **Python**: versão 3.10 ou 3.11
-- **Docker**: (opcional, para execução em container)
+### Pré-requisitos
 
-### Criação do Ambiente Virtual (Linux / macOS)
+- Python 3.10 ou 3.11
+- Docker, opcionalmente, para execução em container
+
+### Ambiente virtual
+
+A partir da raiz do repositório:
 
 ```bash
 python3 -m venv .venv
@@ -74,172 +79,258 @@ source .venv/bin/activate
 pip install -r backend/requirements-dev.txt
 ```
 
-### Configuração de Variáveis de Ambiente (`.env`)
+### Variáveis de ambiente
 
-Crie um arquivo `.env` no diretório `backend/` (ou defina as variáveis no ambiente do sistema):
+Use `backend/.env.example` como referência:
 
 ```dotenv
-SUPABASE_URL=https://sua-instancia.supabase.co
-SUPABASE_PUBLIC_KEY=sua-chave-publica-anon
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_PUBLIC_KEY=sua-chave-publica
+SUPABASE_AUTH_TIMEOUT_SEGUNDOS=5
 ```
 
-> **Atenção**: Use somente a chave pública (`publishable` / `anon`). **Nunca** utilize a `service_role` key. O backend não armazena senhas nem credenciais privadas do Supabase.
+O código usa `os.getenv()` e **não carrega automaticamente um arquivo `.env`**. Para execução local sem Docker, exporte as variáveis para o processo:
+
+```bash
+export SUPABASE_URL="https://seu-projeto.supabase.co"
+export SUPABASE_PUBLIC_KEY="sua-chave-publica"
+export SUPABASE_AUTH_TIMEOUT_SEGUNDOS="5"
+```
+
+Use somente chave pública adequada ao projeto (`publishable` / `anon`). Não use `service_role` no frontend ou no repositório.
 
 ---
 
-## 5. Execução Local e Testes
-
-### Executar a API Localmente
+## 5. Execução local
 
 ```bash
 cd backend
 python executar.py
 ```
 
-O servidor estará escutando em `http://localhost:5000` (ou `http://127.0.0.1:5000`).
+A API fica disponível em:
 
-### Executar a Suíte de Testes (QA)
+- `http://localhost:5000`
+- Swagger UI: `http://localhost:5000/docs`
 
-A partir da raiz do repositório ou de `backend/`:
+---
+
+## 6. Testes
+
+Da raiz do repositório:
 
 ```bash
 pytest backend/tests -q
 ```
 
-**Resultado Atual de Qualidade**:  
-✅ **57 testes automatizados passando 100%** (`57 passed`), cobrindo:
-- CRUD e filtros de Projetos, Grupos, Entidades e Indicadores;
-- Desativação lógica de entidades e indicadores (sem exclusão de histórico);
-- Importação incremental CSV/XLSX, dry-run, detecção de outliers e tratamento de duplicidades;
-- Construção, congelamento e ativação de Bases de Referência;
-- Motor de cálculo de avaliações individuais e em lote;
-- Analytics, evolução temporal, ranking relativo e notas executivas;
-- Validação de tokens e respostas HTTP 401/503 da integração Supabase Auth.
+De dentro de `backend/`:
+
+```bash
+pytest tests -q
+```
+
+Validação realizada no fechamento acadêmico:
+
+**57 testes automatizados passando.**
+
+A suíte cobre os fluxos críticos de importação, Bases de Referência, avaliações, analytics, eventos e autenticação.
 
 ---
 
-## 6. Execução com Docker
+## 7. Docker
 
-O `Dockerfile` na raiz do repositório encapsula o ambiente do backend Python em um container isolado.
+O `Dockerfile` está na raiz do repositório.
 
-### Build da Imagem
+### Build
 
 ```bash
 docker build -t globalscore-api .
 ```
 
-### Executar o Container
+### Execução
+
+Crie um arquivo local `backend/.env` com as variáveis de autenticação e execute:
 
 ```bash
-docker run --rm -p 5000:5000 --env-file backend/.env globalscore-api
+docker run --rm \
+  -p 5000:5000 \
+  --env-file backend/.env \
+  globalscore-api
 ```
 
-Para persistir os dados entre reinicializações do container, monte um volume no diretório `/app/dados`:
+Para preservar o SQLite entre reinicializações:
 
 ```bash
-docker run --rm -p 5000:5000 -v globalscore_dados:/app/dados --env-file backend/.env globalscore-api
+docker run --rm \
+  -p 5000:5000 \
+  -v globalscore_dados:/app/dados \
+  --env-file backend/.env \
+  globalscore-api
+```
+
+Em uma rede Docker compartilhada com o frontend:
+
+```bash
+docker network create globalscore-net
+
+docker run --rm \
+  --network globalscore-net \
+  --name globalscore-api \
+  -p 5000:5000 \
+  -v globalscore_dados:/app/dados \
+  --env-file backend/.env \
+  globalscore-api
 ```
 
 ---
 
-## 7. Documentação OpenAPI / Swagger
+## 8. Swagger / OpenAPI
 
-A documentação interativa OpenAPI (Swagger UI) é gerada automaticamente pelo Flask-RESTX e fica disponível em:
+A documentação interativa gerada pelo Flask-RESTX fica em:
 
-👉 **`http://localhost:5000/docs`**
+**`http://localhost:5000/docs`**
 
-### Recursos da Interface Swagger `/docs`:
-- Visualização detalhada dos **Namespaces** (`/sistema`, `/autenticacao`, `/projetos`, `/grupos`, `/entidades`, `/indicadores`, `/observacoes`, `/bases`, `/avaliacoes`, `/importacoes`, `/analytics`, `/eventos`);
-- Inspeção dos modelos de entrada (Request Body DTOs) e resposta (Response Schemas);
-- Botão **Authorize** no canto superior direito para inserção do token `Bearer <seu_token_jwt>`, liberando o teste interativo das rotas protegidas diretamente no navegador.
+A interface permite:
+
+- visualizar namespaces e endpoints;
+- consultar parâmetros, modelos de entrada e respostas documentadas;
+- testar operações expostas pelo Swagger;
+- informar `Bearer <access_token>` no botão **Authorize** para rotas protegidas.
 
 ---
 
-## 8. Autenticação e API Externa (Supabase Auth)
+## 9. Autenticação e serviço externo
 
-### Serviço Externo Utilizado
-O **Supabase Auth** é a API pública externa utilizada para autenticação de usuários via e-mail e senha.
+O serviço externo utilizado é o **Supabase Auth**.
 
-### Fluxo de Autenticação
+Fluxo:
 
 ```text
-Navegador / Frontend
-  │ 1. POST e-mail/senha no Supabase Auth (/auth/v1/token?grant_type=password)
-  ▼
-Supabase Auth (Serviço Externo)
-  │ 2. Retorna access_token (JWT)
-  ▼
-Navegador / Frontend
-  │ 3. Envia requisição ao Flask com "Authorization: Bearer <access_token>"
-  ▼
-Backend Flask RESTX
-  │ 4. Valida o token via HTTP GET no Supabase (/auth/v1/user)
-  │ 5. Se válido: extrai ID e e-mail do usuário e processa a requisição.
-  │    Se inválido/inexistente: retorna HTTP 401 Unauthorized.
-  │    Se Supabase indisponível: retorna HTTP 503 Service Unavailable.
-  ▼
-SQLite (Banco de Domínio Local)
+Frontend
+  → autentica e-mail/senha no Supabase Auth
+  → recebe access_token
+  → chama a GlobalScore API com Authorization: Bearer <token>
+  → backend valida o token no Supabase Auth
+  → backend processa a requisição autorizada
 ```
 
-> **Nota**: O banco de dados principal de domínio do GlobalScore é o **SQLite** local (`globalscore.db`). O Supabase Auth atua exclusivamente como a API externa de validação de identidade.
+Na validação, o backend consulta o endpoint de usuário do Supabase (`/auth/v1/user`). Token ausente ou rejeitado produz HTTP 401; indisponibilidade do serviço externo pode produzir HTTP 503.
+
+O **SQLite continua sendo o banco de domínio do GlobalScore**. O Supabase é usado para autenticação, não como banco principal da aplicação.
+
+### Cadastro, plano e condições de uso
+
+- cadastro do serviço: [Supabase Dashboard](https://supabase.com/dashboard/sign-up);
+- documentação de autenticação por senha: [Supabase Auth — Password-based authentication](https://supabase.com/docs/guides/auth/passwords);
+- plano utilizado no MVP: [Free Plan do Supabase](https://supabase.com/docs/guides/platform/billing-on-supabase), sujeito aos limites publicados pelo fornecedor;
+- serviço hospedado sujeito aos [termos do Supabase](https://supabase.com/terms);
+- cliente JavaScript usado pelo frontend distribuído sob [licença MIT](https://github.com/supabase/supabase-js/blob/master/LICENSE).
+
+As operações externas efetivamente usadas são:
+
+- `POST /auth/v1/token?grant_type=password`, acionado pelo cliente Supabase no login;
+- `GET /auth/v1/user`, consultado pelo backend para validar o Bearer token.
+
+O GlobalScore utiliza da resposta apenas os dados necessários à sessão, como
+identificador e e-mail do usuário. Dados de projetos, indicadores, observações e
+avaliações não são persistidos no Supabase.
 
 ---
 
-## 9. Principais Grupos de Endpoints
+## 10. Principais endpoints
 
-| Namespace | Caminho Base | Descrição Resumida |
+| Área | Endpoint | Finalidade |
 |---|---|---|
-| `sistema` | `/sistema/saude` | Verificação de integridade da API |
-| `autenticacao` | `/autenticacao/me` | Dados do usuário logado via Supabase |
-| `projetos` | `/projetos` | CRUD e seleção de projetos |
-| `grupos` | `/grupos` | Grupos de comparação dentro de um projeto |
-| `entidades` | `/entidades` | Unidades/Entidades sob avaliação (aceita `PATCH` com desativação lógica) |
-| `indicadores` | `/indicadores` | Indicadores de desempenho (`DELETE` executa desativação lógica) |
-| `observacoes` | `/observacoes` | Lançamentos brutos por entidade, indicador e período |
-| `bases` | `/bases` | Criação, congelamento, ajuste de pesos e ativação de Bases de Referência |
-| `avaliacoes` | `/avaliacoes` | Cálculo de avaliações individuais (`POST`) e em lote (`POST /lote`) |
-| `importacoes` | `/importacoes` | Workflow assistido em 3 etapas (upload, dry-run/validar, confirmar) |
-| `analytics` | `/analytics` | Evolução histórica (`/evolucao`), ranking (`/ranking`) e resumo por base |
-| `eventos` | `/eventos` | Registro e consulta de marcos de intervenção na linha do tempo |
+| Sistema | `GET /sistema/saude` | Saúde da API |
+| Autenticação | `GET /autenticacao/me` | Usuário autenticado |
+| Projetos | `GET/POST /projetos` | Listagem e criação |
+| Grupos | `GET/POST /grupos` | Grupos comparáveis |
+| Entidades | `GET/POST /entidades` | Entidades avaliadas |
+| Indicadores | `GET/POST /indicadores` | Indicadores do projeto |
+| Observações | `GET/POST /observacoes` | Valores por entidade, indicador e período |
+| Importações | `POST /importacoes` | Upload e preview |
+| Importações | `POST /importacoes/{id}/validar` | Dry-run |
+| Importações | `POST /importacoes/{id}/confirmar` | Confirmação transacional |
+| Bases | `GET/POST /bases` | Consulta e criação de Bases de Referência |
+| Bases | `POST /bases/{id}/processar` | Processamento da Base |
+| Bases | `PATCH /bases/{id}/pesos` | Ajuste de pesos |
+| Bases | `POST /bases/{id}/ativar` | Ativação da Base |
+| Avaliações | `POST /avaliacoes` | Avaliação individual |
+| Avaliações | `POST /avaliacoes/processar-lote` | Processamento em lote |
+| Avaliações | `GET /avaliacoes/{id}` | Consulta de avaliação |
+| Analytics | `GET /analytics/overview` | Totais e ranking do período |
+| Analytics | `GET /analytics/entidades/{entidade_id}` | Avaliação, indicadores, evolução, eventos e leitura do período |
+| Eventos | `GET/POST /eventos` | Consulta e criação de eventos gerenciais |
+| Eventos | `PATCH/DELETE /eventos/{id}` | Edição e exclusão de evento |
+
+Para a lista completa e os contratos de cada rota, consulte o Swagger em `/docs`.
 
 ---
 
-## 10. Funcionalidades Principais do Backend
+## 11. Importação assistida incremental
 
-### A) Importação Assistida Incremental
-- Suporte a CSV e XLSX (até 10 MB);
-- Workflow em 3 etapas: `POST /importacoes` (preview/delimitador) → `POST /importacoes/{id}/validar` (dry-run com 3 IQR) → `POST /importacoes/{id}/confirmar` (gravação em lote transacional);
-- Detecção estatística de valores discrepantes (outliers por 3 IQR);
-- Confirmação de alertas de qualidade exigida quando status for `VALIDADA_COM_ALERTAS`.
+O MVP aceita CSV e XLSX com limite de 10 MB.
 
-### B) Bases de Referência e Pesagem
-- Congelamento estático de estatísticas (min, máx, p10..p90) de um período/grupo de referência;
-- Atribuição parametrizável de pesos aos indicadores;
-- Preservação da irrepetibilidade: avaliações utilizam as regras da base ativa no momento da geração.
+Fluxo principal:
 
-### C) Avaliações e Global Score
-- Normalização de observações brutas em percentis (0 a 100);
-- Aplicação de pesos configurados para composição do **Global Score** (escore de 0,0 a 10,0);
-- Atribuição de faixas conceituais e ratings;
-- Suporte a cálculo em lote (`POST /avaliacoes/lote`) para todas as entidades de um grupo.
+1. `POST /importacoes`: guarda temporariamente o arquivo e retorna preview e metadados de leitura.
+2. `POST /importacoes/{id}/validar`: executa o dry-run com mapeamento explícito.
+3. `POST /importacoes/{id}/confirmar`: grava o lote validado em uma única transação.
 
-### D) Analytics & Storytelling
-- Consulta de evolução temporal de uma entidade ao longo dos períodos;
-- Geração de ranking relativo entre entidades pertencentes à mesma base e período;
-- Síntese diagnóstica e resumos para alimentação de interfaces executivas.
+O dry-run separa erros bloqueantes de alertas. Valores extremos podem ser sinalizados por regra de **3 IQR**; eles não são alterados silenciosamente. Duplicidades bloqueantes impedem a confirmação.
+
+Também existem recursos de rastreabilidade, anulação de lote e perfis de importação.
 
 ---
 
-## 11. Segurança e Integridade
+## 12. Bases de Referência e Global Score
 
-- **Validação de Token**: Requisições protegidas exigem cabeçalho `Authorization: Bearer <token>`;
-- **Desativação Lógica**: Indicadores e entidades não são deletados fisicamente do banco de dados quando desativados, preservando o histórico de observações e avaliações já calculadas;
-- **Isolamento de Credenciais**: Nenhuma chave secreta ou senha de usuário trafega ou é gravada no banco de dados local.
+A Base de Referência define o universo comparável e permanece preservada depois de ativada.
+
+Para indicadores válidos, a API constrói uma régua completa com **101 cortes percentílicos: P0, P1, ..., P100**.
+
+Na avaliação:
+
+- a observação da entidade é posicionada nessa régua;
+- cada indicador recebe pontuação de 0 a 100;
+- a direção do indicador pode ser `MAIOR_MELHOR` ou `MENOR_MELHOR`;
+- os pesos dos indicadores participantes devem totalizar exatamente 100%;
+- o Global Score é a soma ponderada das pontuações, permanecendo na escala **0 a 100**;
+- ausência de dados necessários pode gerar avaliação `INCOMPLETA`, sem transformar ausência em nota zero.
+
+O backend **não atribui rating ou faixa conceitual** nesta versão do MVP.
 
 ---
 
-## 12. Limitações Relevantes do MVP
+## 13. Analytics e eventos
 
-1. **Banco SQLite**: Por padrão, o MVP utiliza SQLite como banco de dados em arquivo local (`dados/globalscore.db`). Em ambientes Docker sem volume persistente montado, a reativação do container recria o banco inicial.
-2. **Dependência do Supabase Auth**: As rotas protegidas dependem da conectividade HTTP com o serviço externo do Supabase para validação de JWTs.
-3. **Escopo Acadêmico**: O MVP é focado na consolidação dos conceitos de avaliação multicritério, percentis e storytelling de desempenho.
+`GET /analytics/overview` retorna a visão macro de um projeto/grupo/período, incluindo totais e ranking quando a Base é do modo `ENTRE_ENTIDADES`.
+
+`GET /analytics/entidades/{entidade_id}` retorna o detalhe da entidade para a mesma Base de Referência, incluindo:
+
+- avaliação do período;
+- indicadores;
+- evolução temporal;
+- eventos associados aos períodos;
+- leitura objetiva do período, como score atual, score anterior, variação absoluta e tendência.
+
+Eventos gerenciais são fatos registrados no mesmo período. A aplicação **não infere que um evento causou melhora ou piora do desempenho**.
+
+---
+
+## 14. Segurança e integridade
+
+- rotas protegidas usam `Authorization: Bearer <token>`;
+- credenciais secretas não devem ser versionadas;
+- entidades e indicadores preservam histórico por desativação lógica quando aplicável;
+- Bases ativadas preservam a referência usada nos cálculos;
+- avaliações existentes não são sobrescritas pelo processamento em lote.
+
+---
+
+## 15. Limitações do MVP
+
+- o banco padrão é SQLite em arquivo local;
+- a validação de identidade depende de conectividade com o Supabase Auth;
+- o servidor Flask e o Vite são usados de forma adequada à demonstração acadêmica/local, não como desenho de produção em larga escala;
+- Docker Compose não é necessário para o funcionamento do MVP; os componentes podem ser executados separadamente ou na mesma rede Docker.
