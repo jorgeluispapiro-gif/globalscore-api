@@ -26,6 +26,7 @@ def registrar_namespaces():
         namespace_autenticacao,
         namespace_bases,
         namespace_entidades,
+        namespace_eventos,
         namespace_grupos,
         namespace_indicadores,
         namespace_importacoes,
@@ -40,6 +41,7 @@ def registrar_namespaces():
     api.add_namespace(namespace_projetos)
     api.add_namespace(namespace_grupos)
     api.add_namespace(namespace_entidades)
+    api.add_namespace(namespace_eventos)
     api.add_namespace(namespace_indicadores)
     api.add_namespace(namespace_observacoes)
     api.add_namespace(namespace_importacoes)

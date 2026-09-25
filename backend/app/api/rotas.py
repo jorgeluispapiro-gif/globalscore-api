@@ -1,4 +1,5 @@
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from app.modelos import (
     Avaliacao,
     BaseReferencia,
     Entidade,
+    Evento,
     GrupoComparavel,
     Indicador,
     IndicadorBaseReferencia,
@@ -55,6 +57,7 @@ namespace_autenticacao = Namespace(
 namespace_projetos = Namespace("projetos", description="Configuração dos projetos")
 namespace_grupos = Namespace("grupos", description="Configuração dos grupos comparáveis")
 namespace_entidades = Namespace("entidades", description="Cadastro das entidades avaliadas")
+namespace_eventos = Namespace("eventos", description="Eventos gerenciais das entidades")
 namespace_indicadores = Namespace("indicadores", description="CRUD de indicadores")
 namespace_observacoes = Namespace("observacoes", description="Consulta e entrada manual de valores")
 namespace_bases = Namespace("bases", description="Construção e ativação das bases")
@@ -167,6 +170,17 @@ modelo_entidade = namespace_entidades.model(
         "nome": fields.String(required=True),
         "descricao": fields.String,
         "ativa": fields.Boolean(default=True),
+    },
+)
+
+modelo_evento = namespace_eventos.model(
+    "EventoEntrada",
+    {
+        "projeto_id": fields.Integer(required=True),
+        "entidade_id": fields.Integer(required=True),
+        "periodo": fields.String(required=True, example="2026-03"),
+        "titulo": fields.String(required=True),
+        "descricao": fields.String,
     },
 )
 
@@ -290,6 +304,43 @@ def entidade_para_dict(entidade):
         "descricao": entidade.descricao,
         "ativa": entidade.ativa,
     }
+
+
+def evento_para_dict(evento):
+    """Expõe somente os dados gerenciais do evento."""
+
+    return {
+        "id": evento.id,
+        "projeto_id": evento.projeto_id,
+        "entidade_id": evento.entidade_id,
+        "periodo": evento.periodo,
+        "titulo": evento.titulo,
+        "descricao": evento.descricao,
+        "criado_em": evento.criado_em.isoformat(),
+    }
+
+
+def validar_periodo_evento(periodo):
+    """Valida o período mensal sem atribuir significado causal ao evento."""
+
+    if not isinstance(periodo, str) or not re.fullmatch(
+        r"\d{4}-(0[1-9]|1[0-2])", periodo
+    ):
+        namespace_eventos.abort(400, "O período deve seguir o formato AAAA-MM.")
+
+
+def validar_entidade_do_projeto(projeto_id, entidade_id):
+    """Impede que um evento relacione cadastros pertencentes a projetos distintos."""
+
+    projeto = banco.session.get(Projeto, projeto_id)
+    if projeto is None:
+        namespace_eventos.abort(404, "Projeto não encontrado.")
+    entidade = banco.session.get(Entidade, entidade_id)
+    if entidade is None:
+        namespace_eventos.abort(404, "Entidade não encontrada.")
+    if entidade.projeto_id != projeto.id:
+        namespace_eventos.abort(400, "A entidade deve pertencer ao projeto informado.")
+    return entidade
 
 
 def observacao_para_dict(observacao):
@@ -561,6 +612,97 @@ class EntidadeResource(Resource):
             "Já existe uma entidade com esse código dentro do projeto.",
         )
         return entidade_para_dict(entidade)
+
+
+@namespace_eventos.route("")
+@namespace_eventos.doc(security="Bearer")
+class EventosResource(Resource):
+    @namespace_eventos.doc(
+        params={
+            "projeto_id": "Identificador obrigatório do projeto.",
+            "entidade_id": "Identificador obrigatório da entidade.",
+        }
+    )
+    @autenticacao_obrigatoria
+    def get(self):
+        """Lista cronologicamente os eventos de uma entidade."""
+
+        projeto_id = request.args.get("projeto_id", type=int)
+        entidade_id = request.args.get("entidade_id", type=int)
+        if projeto_id is None or entidade_id is None:
+            namespace_eventos.abort(
+                400, "Informe projeto_id e entidade_id para listar os eventos."
+            )
+        validar_entidade_do_projeto(projeto_id, entidade_id)
+        eventos = (
+            Evento.query.filter_by(projeto_id=projeto_id, entidade_id=entidade_id)
+            .order_by(Evento.periodo, Evento.criado_em, Evento.id)
+            .all()
+        )
+        return [evento_para_dict(evento) for evento in eventos]
+
+    @namespace_eventos.expect(modelo_evento, validate=True)
+    @autenticacao_obrigatoria
+    def post(self):
+        """Registra um fato gerencial sem inferir efeito sobre o desempenho."""
+
+        dados = request.json
+        validar_entidade_do_projeto(dados["projeto_id"], dados["entidade_id"])
+        validar_periodo_evento(dados["periodo"])
+        titulo = str(dados["titulo"]).strip()
+        if not titulo:
+            namespace_eventos.abort(400, "O título do evento é obrigatório.")
+        evento = Evento(
+            projeto_id=dados["projeto_id"],
+            entidade_id=dados["entidade_id"],
+            periodo=dados["periodo"],
+            titulo=titulo,
+            descricao=dados.get("descricao"),
+        )
+        banco.session.add(evento)
+        banco.session.commit()
+        return evento_para_dict(evento), 201
+
+
+@namespace_eventos.route("/<int:evento_id>")
+@namespace_eventos.doc(security="Bearer")
+class EventoResource(Resource):
+    @namespace_eventos.expect(modelo_evento, validate=False)
+    @autenticacao_obrigatoria
+    def patch(self, evento_id):
+        """Edita o período e o conteúdo, preservando projeto e entidade."""
+
+        evento = banco.session.get(Evento, evento_id)
+        if evento is None:
+            namespace_eventos.abort(404, "Evento não encontrado.")
+        dados = request.json or {}
+        if "projeto_id" in dados and dados["projeto_id"] != evento.projeto_id:
+            namespace_eventos.abort(400, "O projeto de um evento não pode ser alterado.")
+        if "entidade_id" in dados and dados["entidade_id"] != evento.entidade_id:
+            namespace_eventos.abort(400, "A entidade de um evento não pode ser alterada.")
+        if "periodo" in dados:
+            validar_periodo_evento(dados["periodo"])
+            evento.periodo = dados["periodo"]
+        if "titulo" in dados:
+            titulo = str(dados["titulo"]).strip()
+            if not titulo:
+                namespace_eventos.abort(400, "O título do evento é obrigatório.")
+            evento.titulo = titulo
+        if "descricao" in dados:
+            evento.descricao = dados["descricao"]
+        banco.session.commit()
+        return evento_para_dict(evento)
+
+    @autenticacao_obrigatoria
+    def delete(self, evento_id):
+        """Exclui o evento; avaliações e observações permanecem intactas."""
+
+        evento = banco.session.get(Evento, evento_id)
+        if evento is None:
+            namespace_eventos.abort(404, "Evento não encontrado.")
+        banco.session.delete(evento)
+        banco.session.commit()
+        return "", 204
 
 
 @namespace_indicadores.route("")

@@ -9,6 +9,7 @@ from app.modelos import (
     Avaliacao,
     BaseReferencia,
     Entidade,
+    Evento,
     GrupoComparavel,
     Indicador,
     ItemAvaliacao,
@@ -279,7 +280,12 @@ def test_periodo_sem_resultado_retorna_estado_vazio_previsivel(ambiente_analitic
     assert dados_detalhe["avaliacao"] is None
     assert dados_detalhe["indicadores"] == []
     assert dados_detalhe["evolucao"] == [
-        {"periodo": "2026-01", "global_score": 90.0, "status": "CALCULADA"}
+        {
+            "periodo": "2026-01",
+            "global_score": 90.0,
+            "status": "CALCULADA",
+            "eventos": [],
+        }
     ]
 
 
@@ -294,3 +300,71 @@ def test_entidade_inexistente_retorna_404(ambiente_analitico):
 
     assert resposta.status_code == 404
     assert resposta.get_json()["message"] == "Entidade não encontrada."
+
+
+def test_detalhe_relaciona_eventos_com_a_evolucao(ambiente_analitico):
+    banco.session.add_all(
+        [
+            Evento(
+                projeto_id=ambiente_analitico["projeto_id"],
+                entidade_id=ambiente_analitico["entidades"][0],
+                periodo="2026-02",
+                titulo="Treinamento da equipe",
+            ),
+            Evento(
+                projeto_id=ambiente_analitico["projeto_id"],
+                entidade_id=ambiente_analitico["entidades"][0],
+                periodo="2026-03",
+                titulo="Mudança operacional",
+            ),
+        ]
+    )
+    banco.session.commit()
+
+    resposta = ambiente_analitico["cliente"].get(
+        f"/analytics/entidades/{ambiente_analitico['entidades'][0]}",
+        query_string={
+            "base_referencia_id": ambiente_analitico["base_id"],
+            "periodo": "2026-02",
+        },
+    )
+
+    dados = resposta.get_json()
+    assert resposta.status_code == 200
+    assert [evento["periodo"] for evento in dados["eventos"]] == ["2026-02", "2026-03"]
+    assert dados["evolucao"][1]["eventos"][0]["titulo"] == "Treinamento da equipe"
+    assert dados["evolucao"][0]["eventos"] == []
+
+
+def test_leitura_do_periodo_informa_variacao_e_tendencia(ambiente_analitico):
+    resposta = ambiente_analitico["cliente"].get(
+        f"/analytics/entidades/{ambiente_analitico['entidades'][0]}",
+        query_string={
+            "base_referencia_id": ambiente_analitico["base_id"],
+            "periodo": "2026-02",
+        },
+    )
+
+    assert resposta.get_json()["leitura_periodo"] == {
+        "global_score_atual": 76.0,
+        "global_score_anterior": 70.0,
+        "variacao_absoluta": 6.0,
+        "tendencia": "SUBIU",
+    }
+
+
+def test_primeiro_periodo_nao_possui_comparacao_anterior(ambiente_analitico):
+    resposta = ambiente_analitico["cliente"].get(
+        f"/analytics/entidades/{ambiente_analitico['entidades'][0]}",
+        query_string={
+            "base_referencia_id": ambiente_analitico["base_id"],
+            "periodo": "2026-01",
+        },
+    )
+
+    assert resposta.get_json()["leitura_periodo"] == {
+        "global_score_atual": 70.0,
+        "global_score_anterior": None,
+        "variacao_absoluta": None,
+        "tendencia": "SEM_COMPARACAO",
+    }

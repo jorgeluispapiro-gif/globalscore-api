@@ -63,6 +63,23 @@ class Entidade(banco.Model):
     grupo = banco.relationship("GrupoComparavel", backref="entidades")
 
 
+class Evento(banco.Model):
+    """Fato gerencial associado a uma entidade e a um período mensal."""
+
+    __tablename__ = "eventos"
+
+    id = banco.Column(banco.Integer, primary_key=True)
+    projeto_id = banco.Column(banco.ForeignKey("projetos.id"), nullable=False, index=True)
+    entidade_id = banco.Column(banco.ForeignKey("entidades.id"), nullable=False, index=True)
+    periodo = banco.Column(banco.String(7), nullable=False, index=True)
+    titulo = banco.Column(banco.String(160), nullable=False)
+    descricao = banco.Column(banco.Text)
+    criado_em = banco.Column(banco.DateTime(timezone=True), nullable=False, default=agora_utc)
+
+    projeto = banco.relationship("Projeto", backref="eventos")
+    entidade = banco.relationship("Entidade", backref="eventos")
+
+
 class Indicador(banco.Model):
     __tablename__ = "indicadores"
     __table_args__ = (

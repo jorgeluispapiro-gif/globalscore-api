@@ -5,6 +5,7 @@ from app.modelos import (
     Avaliacao,
     BaseReferencia,
     Entidade,
+    Evento,
     GrupoComparavel,
     Indicador,
     ItemAvaliacao,
@@ -34,6 +35,72 @@ def _base_para_resumo(base):
         "entidade_referencia_id": base.entidade_referencia_id,
         "periodo_inicial": base.periodo_inicial,
         "periodo_final": base.periodo_final,
+    }
+
+
+def _evento_para_resumo(evento):
+    """Prepara o fato registrado sem produzir interpretação causal."""
+
+    return {
+        "id": evento.id,
+        "projeto_id": evento.projeto_id,
+        "entidade_id": evento.entidade_id,
+        "periodo": evento.periodo,
+        "titulo": evento.titulo,
+        "descricao": evento.descricao,
+        "criado_em": evento.criado_em.isoformat(),
+    }
+
+
+def _obter_leitura_periodo(entidade_id, base_id, periodo, avaliacao_atual):
+    """Compara resultados persistidos da mesma Base, sem recalcular pontuações."""
+
+    score_atual = None
+    if (
+        avaliacao_atual is not None
+        and avaliacao_atual.status == "CALCULADA"
+        and avaliacao_atual.global_score is not None
+    ):
+        score_atual = avaliacao_atual.global_score
+
+    avaliacao_anterior = None
+    if score_atual is not None:
+        avaliacao_anterior = (
+            Avaliacao.query.filter(
+                Avaliacao.entidade_id == entidade_id,
+                Avaliacao.base_referencia_id == base_id,
+                Avaliacao.periodo < periodo,
+                Avaliacao.status == "CALCULADA",
+                Avaliacao.global_score.is_not(None),
+            )
+            .order_by(Avaliacao.periodo.desc(), Avaliacao.id.desc())
+            .first()
+        )
+
+    score_anterior = (
+        avaliacao_anterior.global_score if avaliacao_anterior is not None else None
+    )
+    variacao = (
+        score_atual - score_anterior
+        if score_atual is not None and score_anterior is not None
+        else None
+    )
+    tendencia = "SEM_COMPARACAO"
+    if variacao is not None:
+        if variacao > 0:
+            tendencia = "SUBIU"
+        elif variacao < 0:
+            tendencia = "CAIU"
+        else:
+            tendencia = "ESTAVEL"
+
+    return {
+        "global_score_atual": float(score_atual) if score_atual is not None else None,
+        "global_score_anterior": (
+            float(score_anterior) if score_anterior is not None else None
+        ),
+        "variacao_absoluta": float(variacao) if variacao is not None else None,
+        "tendencia": tendencia,
     }
 
 
@@ -127,7 +194,7 @@ def obter_visao_geral(projeto_id, grupo_id, periodo):
 
 
 def obter_detalhe_entidade(entidade_id, base_referencia_id, periodo):
-    """Reúne avaliação, indicadores e evolução sem recompor resultados."""
+    """Reúne avaliação, eventos e evolução factual sem recompor resultados."""
 
     _validar_periodo(periodo)
     entidade = banco.session.get(Entidade, entidade_id)
@@ -181,18 +248,35 @@ def obter_detalhe_entidade(entidade_id, base_referencia_id, periodo):
             for item, indicador in itens
         ]
 
-    evolucao = [
-        {
-            "periodo": item.periodo,
-            "global_score": float(item.global_score) if item.global_score is not None else None,
-            "status": item.status,
-        }
-        for item in Avaliacao.query.filter_by(
+    eventos = [
+        _evento_para_resumo(item)
+        for item in Evento.query.filter_by(
+            projeto_id=entidade.projeto_id,
+            entidade_id=entidade.id,
+        )
+        .order_by(Evento.periodo, Evento.criado_em, Evento.id)
+        .all()
+    ]
+    eventos_por_periodo = {}
+    for evento in eventos:
+        eventos_por_periodo.setdefault(evento["periodo"], []).append(evento)
+
+    avaliacoes_evolucao = (
+        Avaliacao.query.filter_by(
             entidade_id=entidade.id,
             base_referencia_id=base.id,
         )
         .order_by(Avaliacao.periodo, Avaliacao.id)
         .all()
+    )
+    evolucao = [
+        {
+            "periodo": item.periodo,
+            "global_score": float(item.global_score) if item.global_score is not None else None,
+            "status": item.status,
+            "eventos": eventos_por_periodo.get(item.periodo, []),
+        }
+        for item in avaliacoes_evolucao
     ]
 
     return {
@@ -204,6 +288,10 @@ def obter_detalhe_entidade(entidade_id, base_referencia_id, periodo):
         "base_referencia": _base_para_resumo(base),
         "periodo": periodo,
         "avaliacao": resumo_avaliacao,
+        "leitura_periodo": _obter_leitura_periodo(
+            entidade.id, base.id, periodo, avaliacao
+        ),
         "indicadores": indicadores,
         "evolucao": evolucao,
+        "eventos": eventos,
     }
