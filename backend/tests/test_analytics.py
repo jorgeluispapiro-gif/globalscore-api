@@ -177,6 +177,49 @@ def test_overview_ordena_ranking_e_separa_incompletas(ambiente_analitico):
     assert [item["global_score"] for item in dados["ranking"]] == [90.0, 70.0]
 
 
+def test_overview_informa_entidade_de_referencia_da_base_historica(ambiente_analitico):
+    grupo = GrupoComparavel(
+        projeto_id=ambiente_analitico["projeto_id"], nome="Acompanhamento individual"
+    )
+    banco.session.add(grupo)
+    banco.session.flush()
+    entidade = Entidade(
+        projeto_id=ambiente_analitico["projeto_id"],
+        grupo_id=grupo.id,
+        codigo="HIST-001",
+        nome="Unidade histórica",
+    )
+    banco.session.add(entidade)
+    banco.session.flush()
+    base = BaseReferencia(
+        projeto_id=ambiente_analitico["projeto_id"],
+        grupo_id=grupo.id,
+        modo="HISTORICO_ENTIDADE",
+        entidade_referencia_id=entidade.id,
+        nome="Histórico próprio",
+        versao=1,
+        periodo_inicial="2025-01",
+        periodo_final="2025-12",
+        status="ATIVA",
+    )
+    banco.session.add(base)
+    banco.session.commit()
+
+    resposta = ambiente_analitico["cliente"].get(
+        "/analytics/overview",
+        query_string={
+            "projeto_id": ambiente_analitico["projeto_id"],
+            "grupo_id": grupo.id,
+            "periodo": "2026-01",
+        },
+    )
+
+    assert resposta.status_code == 200
+    dados = resposta.get_json()
+    assert dados["base_referencia"]["entidade_referencia_id"] == entidade.id
+    assert dados["ranking"] == []
+
+
 def test_detalhe_retorna_indicadores_e_evolucao_cronologica(ambiente_analitico):
     resposta = ambiente_analitico["cliente"].get(
         f"/analytics/entidades/{ambiente_analitico['entidades'][0]}",

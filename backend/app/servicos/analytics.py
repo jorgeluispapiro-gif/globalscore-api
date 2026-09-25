@@ -31,6 +31,7 @@ def _base_para_resumo(base):
         "nome": base.nome,
         "versao": base.versao,
         "modo": base.modo,
+        "entidade_referencia_id": base.entidade_referencia_id,
         "periodo_inicial": base.periodo_inicial,
         "periodo_final": base.periodo_final,
     }
